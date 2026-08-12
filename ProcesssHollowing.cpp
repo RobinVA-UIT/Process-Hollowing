@@ -308,6 +308,7 @@ bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
     for (int i = 0; i < lpNT->FileHeader.NumberOfSections; ++i) {
         const auto lpImageSectionHeader =
             (PIMAGE_SECTION_HEADER)((uintptr_t)lpNT + 4 +
+                                    sizeof(IMAGE_FILE_HEADER) +
                                     lpNT->FileHeader.SizeOfOptionalHeader +
                                     (i * sizeof(IMAGE_SECTION_HEADER)));
 
@@ -395,6 +396,7 @@ bool RunPE64(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
     for (int i = 0; i < lpNT->FileHeader.NumberOfSections; ++i) {
         const auto lpImageSectionHeader =
             (PIMAGE_SECTION_HEADER)((uintptr_t)lpNT + 4 +
+                                    sizeof(IMAGE_FILE_HEADER) +
                                     lpNT->FileHeader.SizeOfOptionalHeader +
                                     (i * sizeof(IMAGE_SECTION_HEADER)));
         std::cout << "\n[+] Size of section " << i + 1 << ": "
@@ -528,7 +530,7 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
     // Write sections
     for (int i = 0; i < lpNT->FileHeader.NumberOfSections; ++i) {
         const auto lpImageSectionHeader =
-            (PIMAGE_SECTION_HEADER)((uintptr_t)lpNT + 4 +
+            (PIMAGE_SECTION_HEADER)((uintptr_t)lpNT + 4 + sizeof(IMAGE_FILE_HEADER) + 
                                     lpNT->FileHeader.SizeOfOptionalHeader +
                                     (i * sizeof(IMAGE_SECTION_HEADER)));
 
