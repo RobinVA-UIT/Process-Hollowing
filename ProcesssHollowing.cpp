@@ -89,7 +89,7 @@ LPVOID GetFileContent(const LPSTR& lpSourceImage) {
     const HANDLE hFileContent =
         HeapAlloc(GetProcessHeap(), 0,
                   (SIZE_T)dwFileSize);  // Allocate heap for the payload
-    if (hFileContent == INVALID_HANDLE_VALUE) {
+    if (hFileContent == NULL) {
         std::cout << "\nHeap allocation failed.";
         CloseHandle(hFile);
         CloseHandle(hFileContent);
