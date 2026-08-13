@@ -482,14 +482,28 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
     std::cout << "\n[+] Size of image: "
               << (SIZE_T)lpNT->OptionalHeader.SizeOfImage;
 
-    // Alloc
-    LPVOID lpAllocAddress = VirtualAllocEx(
-        lpPI->hProcess, NULL, (SIZE_T)lpNT->OptionalHeader.SizeOfImage,
-        MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    bool bNeedReloc = false;
+    LPVOID lpAllocAddress;
 
-    if (lpAllocAddress == NULL) {
-        std::cout << "\nVirtualAllocEx failed. Error code: " << GetLastError();
-        return false;
+    // Try to alloc in the ImageBase
+    lpAllocAddress = VirtualAllocEx(
+        lpPI->hProcess, (LPVOID)((uintptr_t)lpNT->OptionalHeader.ImageBase),
+        (SIZE_T)lpNT->OptionalHeader.SizeOfImage, MEM_RESERVE | MEM_COMMIT,
+        PAGE_EXECUTE_READWRITE);
+
+    if (lpAllocAddress == NULL) bNeedReloc = true;
+
+    // If previous allocation fails, lpAddress = NULL
+    if (bNeedReloc) {
+        lpAllocAddress = VirtualAllocEx(
+            lpPI->hProcess, NULL, (SIZE_T)lpNT->OptionalHeader.SizeOfImage,
+            MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+        if (lpAllocAddress == NULL) {
+            std::cout << "\nVirtualAllocEx failed. Error code: "
+                      << GetLastError();
+            return false;
+        }
     }
 
     std::cout << "\n[+] Alloc address: " << (uintptr_t)lpAllocAddress;
@@ -501,7 +515,7 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
     std::cout << "\n[+] Delta: " << DeltaImageBase;
 
     // Set new ImageBase
-    lpNT->OptionalHeader.ImageBase = (DWORD64)lpAllocAddress;
+    if (bNeedReloc) lpNT->OptionalHeader.ImageBase = (DWORD64)lpAllocAddress;
 
     std::cout << "\n[+] Size of headers: "
               << (SIZE_T)lpNT->OptionalHeader.SizeOfHeaders;
@@ -515,10 +529,13 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
     }
 
     // Setup variables for .reloc
-    const IMAGE_DATA_DIRECTORY ImgDataReloc =
-        GetReloc32(lpFileContent);  // The reloc table
+    IMAGE_DATA_DIRECTORY ImgDataReloc;
 
-    if (ImgDataReloc.VirtualAddress == 0 && ImgDataReloc.Size == 0) {
+    if (bNeedReloc)
+        ImgDataReloc = GetReloc32(lpFileContent);  // The reloc table
+
+    if (bNeedReloc && ImgDataReloc.VirtualAddress == 0 &&
+        ImgDataReloc.Size == 0) {
         std::cout << "\nUnable to retrieve reloc table. Error code: "
                   << GetLastError();
         return false;
@@ -530,11 +547,13 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
     // Write sections
     for (int i = 0; i < lpNT->FileHeader.NumberOfSections; ++i) {
         const auto lpImageSectionHeader =
-            (PIMAGE_SECTION_HEADER)((uintptr_t)lpNT + 4 + sizeof(IMAGE_FILE_HEADER) + 
+            (PIMAGE_SECTION_HEADER)((uintptr_t)lpNT + 4 +
+                                    sizeof(IMAGE_FILE_HEADER) +
                                     lpNT->FileHeader.SizeOfOptionalHeader +
                                     (i * sizeof(IMAGE_SECTION_HEADER)));
 
-        if (ImgDataReloc.VirtualAddress >= (uintptr_t)lpImageSectionHeader &&
+        if (bNeedReloc &&
+            ImgDataReloc.VirtualAddress >= (uintptr_t)lpImageSectionHeader &&
             ImgDataReloc.VirtualAddress <
                 (lpImageSectionHeader->VirtualAddress +
                  lpImageSectionHeader->Misc.VirtualSize))
@@ -554,64 +573,69 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
         }
     }
 
-    if (lpRelocSection == nullptr) {
+    if (bNeedReloc && lpRelocSection == nullptr) {
         std::cout << "\nCannot find relocation section.";
         return false;
     }
 
     // Fixing addresses
-    std::cout << "\n=====FIXING ADDRESSES=====\n";
-    int iNumOfBlocks = 0;
-    DWORD dwRelocOffset = 0;
+    if (bNeedReloc) {
+        std::cout << "\n=====FIXING ADDRESSES=====\n";
+        int iNumOfBlocks = 0;
+        DWORD dwRelocOffset = 0;
 
-    while (dwRelocOffset < ImgDataReloc.Size) {
-        // IMAGE_BASE_RELOCATION has a member called VirtualAddress
-        // This indicates the start of a page (4KB) that has addresses to be
-        // fixed, and these addresses are in this block
-        std::cout << "\n[+] Block " << ++iNumOfBlocks;
-        const auto RelocBlock =
-            (PIMAGE_BASE_RELOCATION)(DWORD64)((uintptr_t)lpFileContent +
-                                              lpRelocSection->PointerToRawData +
-                                              dwRelocOffset);  // Get the reloc
-                                                               // block
-        dwRelocOffset += sizeof(IMAGE_BASE_RELOCATION);
+        while (dwRelocOffset < ImgDataReloc.Size) {
+            // IMAGE_BASE_RELOCATION has a member called VirtualAddress
+            // This indicates the start of a page (4KB) that has addresses to be
+            // fixed, and these addresses are in this block
+            std::cout << "\n[+] Block " << ++iNumOfBlocks;
+            const auto RelocBlock =
+                (PIMAGE_BASE_RELOCATION)(DWORD64)((uintptr_t)lpFileContent +
+                                                  lpRelocSection
+                                                      ->PointerToRawData +
+                                                  dwRelocOffset);  // Get the
+                                                                   // reloc
+                                                                   // block
+            dwRelocOffset += sizeof(IMAGE_BASE_RELOCATION);
 
-        DWORD dwNumOfEntries = (DWORD)(RelocBlock->SizeOfBlock - 0x8) /
-                               0x2;  // 0x2 is the size of IMAGE_RELOC_ENTRY
+            DWORD dwNumOfEntries = (DWORD)(RelocBlock->SizeOfBlock - 0x8) /
+                                   0x2;  // 0x2 is the size of IMAGE_RELOC_ENTRY
 
-        for (DWORD i = 0; i < dwNumOfEntries; ++i) {
-            const auto RelocEntry =
-                (PIMAGE_RELOCATION_ENTRY)(DWORD64)((uintptr_t)lpFileContent +
-                                                   lpRelocSection
-                                                       ->PointerToRawData +
-                                                   dwRelocOffset);
-            dwRelocOffset += 0x2;
+            for (DWORD i = 0; i < dwNumOfEntries; ++i) {
+                const auto RelocEntry =
+                    (PIMAGE_RELOCATION_ENTRY)(DWORD64)((uintptr_t)
+                                                           lpFileContent +
+                                                       lpRelocSection
+                                                           ->PointerToRawData +
+                                                       dwRelocOffset);
+                dwRelocOffset += 0x2;
 
-            if (RelocEntry->Type == 0) continue;
+                if (RelocEntry->Type == 0) continue;
 
-            const auto ptrToTheAddressToFix = (uintptr_t)lpAllocAddress +
-                                              RelocBlock->VirtualAddress +
-                                              RelocEntry->Offset;
+                const auto ptrToTheAddressToFix = (uintptr_t)lpAllocAddress +
+                                                  RelocBlock->VirtualAddress +
+                                                  RelocEntry->Offset;
 
-            DWORD dwFixedAddress;
+                DWORD dwFixedAddress;
 
-            if (!ReadProcessMemory(lpPI->hProcess, (LPVOID)ptrToTheAddressToFix,
-                                   (LPVOID)&dwFixedAddress, sizeof(DWORD),
-                                   NULL)) {
-                std::cout
-                    << "\nCannot read the address to be fixed. Error code: "
-                    << GetLastError();
-                return false;
-            }
+                if (!ReadProcessMemory(
+                        lpPI->hProcess, (LPVOID)ptrToTheAddressToFix,
+                        (LPVOID)&dwFixedAddress, sizeof(DWORD), NULL)) {
+                    std::cout
+                        << "\nCannot read the address to be fixed. Error code: "
+                        << GetLastError();
+                    return false;
+                }
 
-            dwFixedAddress += DeltaImageBase;
+                dwFixedAddress += DeltaImageBase;
 
-            if (!WriteProcessMemory(
-                    lpPI->hProcess, (LPVOID)ptrToTheAddressToFix,
-                    (LPVOID)&dwFixedAddress, sizeof(DWORD), NULL)) {
-                std::cout << "\nCannot patch new address. Error code: "
-                          << GetLastError();
-                return false;
+                if (!WriteProcessMemory(
+                        lpPI->hProcess, (LPVOID)ptrToTheAddressToFix,
+                        (LPVOID)&dwFixedAddress, sizeof(DWORD), NULL)) {
+                    std::cout << "\nCannot patch new address. Error code: "
+                              << GetLastError();
+                    return false;
+                }
             }
         }
     }
@@ -655,17 +679,31 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
     std::cout << "\n[+] Size of image: "
               << (SIZE_T)lpNT->OptionalHeader.SizeOfImage;
 
-    // Alloc
-    LPVOID lpAllocAddress = VirtualAllocEx(
-        lpPI->hProcess, NULL, (SIZE_T)lpNT->OptionalHeader.SizeOfImage,
-        MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    bool bNeedReloc = false;
+    LPVOID lpAllocAddress;
 
-    if (lpAllocAddress == NULL) {
-        std::cout << "\nVirtualAllocEx failed. Error code: " << GetLastError();
-        return false;
+    // Try to alloc in the ImageBase
+    lpAllocAddress = VirtualAllocEx(
+        lpPI->hProcess, (LPVOID)((uintptr_t)lpNT->OptionalHeader.ImageBase),
+        (SIZE_T)lpNT->OptionalHeader.SizeOfImage, MEM_RESERVE | MEM_COMMIT,
+        PAGE_EXECUTE_READWRITE);
+
+    if (lpAllocAddress == NULL) bNeedReloc = true;
+
+    // If previous allocation fails, lpAddress = NULL
+    if (bNeedReloc) {
+        lpAllocAddress = VirtualAllocEx(
+            lpPI->hProcess, NULL, (SIZE_T)lpNT->OptionalHeader.SizeOfImage,
+            MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+        if (lpAllocAddress == NULL) {
+            std::cout << "\nVirtualAllocEx failed. Error code: "
+                      << GetLastError();
+            return false;
+        }
     }
 
-    std::cout << "\nAlloc address: " << (uintptr_t)lpAllocAddress;
+    std::cout << "\n[+] Alloc address: " << (uintptr_t)lpAllocAddress;
 
     // Delta
     const DWORD64 DeltaImageBase =
@@ -674,10 +712,11 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
     std::cout << "\n[+] Delta: " << DeltaImageBase;
 
     // Set new ImageBase
-    lpNT->OptionalHeader.ImageBase = (DWORD64)lpAllocAddress;
+    if (bNeedReloc) lpNT->OptionalHeader.ImageBase = (DWORD64)lpAllocAddress;
 
     std::cout << "\n[+] Size of headers: "
               << (SIZE_T)lpNT->OptionalHeader.SizeOfHeaders;
+
     // Write headers
     if (!WriteProcessMemory(lpPI->hProcess, lpAllocAddress, lpFileContent,
                             (SIZE_T)lpNT->OptionalHeader.SizeOfHeaders, NULL)) {
@@ -687,10 +726,13 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
     }
 
     // Setup variables for .reloc
-    const IMAGE_DATA_DIRECTORY ImgDataReloc =
-        GetReloc64(lpFileContent);  // The reloc table
+    IMAGE_DATA_DIRECTORY ImgDataReloc;
 
-    if (ImgDataReloc.VirtualAddress == 0 && ImgDataReloc.Size == 0) {
+    if (bNeedReloc)
+        ImgDataReloc = GetReloc64(lpFileContent);  // The reloc table
+
+    if (bNeedReloc && ImgDataReloc.VirtualAddress == 0 &&
+        ImgDataReloc.Size == 0) {
         std::cout << "\nUnable to retrieve reloc table. Error code: "
                   << GetLastError();
         return false;
@@ -718,9 +760,9 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
                   << (SIZE_T)lpNT->OptionalHeader.SizeOfImage;
         // Check if the size of the section is larger than the allocated space
         // lpImageSectionHeader->VirtualAddress is RVA, not VA
-        if ((lpImageSectionHeader->VirtualAddress +
-             lpImageSectionHeader->Misc.VirtualSize) >
-            (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
+        if (bNeedReloc && (lpImageSectionHeader->VirtualAddress +
+                           lpImageSectionHeader->Misc.VirtualSize) >
+                              (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
             std::cout
                 << "\nThe section's size is larger than the allocated space.";
             return false;
@@ -747,68 +789,73 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
         }
     }
 
-    if (lpRelocSection == nullptr) {
+    if (bNeedReloc && lpRelocSection == nullptr) {
         std::cout << "\nCannot find relocation section.";
         return false;
     }
 
     // Fixing addresses
-    std::cout << "\n=====FIXING ADDRESSES=====\n";
-    DWORD64 dwRelocOffset = 0;
-    int iNumOfBlocks = 0;
-    while (dwRelocOffset < ImgDataReloc.Size) {
-        // IMAGE_BASE_RELOCATION has a member called VirtualAddress
-        // This indicates the start of a page (4KB) that has addresses to be
-        // fixed, and these addresses are in this block
-        std::cout << "\n[+] Block " << ++iNumOfBlocks;
-        const auto RelocBlock =
-            (PIMAGE_BASE_RELOCATION)(DWORD64)((uintptr_t)lpFileContent +
-                                              lpRelocSection->PointerToRawData +
-                                              dwRelocOffset);  // Get the reloc
-                                                               // block
-        std::cout << "\nGetting reloc block done.";
-        dwRelocOffset += sizeof(IMAGE_BASE_RELOCATION);
-        std::cout << "\n[+] Reloc Offset: " << dwRelocOffset;
+    if (bNeedReloc) {
+        std::cout << "\n=====FIXING ADDRESSES=====\n";
+        DWORD64 dwRelocOffset = 0;
+        int iNumOfBlocks = 0;
+        while (dwRelocOffset < ImgDataReloc.Size) {
+            // IMAGE_BASE_RELOCATION has a member called VirtualAddress
+            // This indicates the start of a page (4KB) that has addresses to be
+            // fixed, and these addresses are in this block
+            std::cout << "\n[+] Block " << ++iNumOfBlocks;
+            const auto RelocBlock =
+                (PIMAGE_BASE_RELOCATION)(DWORD64)((uintptr_t)lpFileContent +
+                                                  lpRelocSection
+                                                      ->PointerToRawData +
+                                                  dwRelocOffset);  // Get the
+                                                                   // reloc
+                                                                   // block
+            std::cout << "\nGetting reloc block done.";
+            dwRelocOffset += sizeof(IMAGE_BASE_RELOCATION);
+            std::cout << "\n[+] Reloc Offset: " << dwRelocOffset;
 
-        std::cout << "\n- Size of block: " << RelocBlock->SizeOfBlock;
-        std::cout << "\n- Size of IMAGE_RELOCATION_ENTRY: "
-                  << sizeof(IMAGE_RELOCATION_ENTRY);
+            std::cout << "\n- Size of block: " << RelocBlock->SizeOfBlock;
+            std::cout << "\n- Size of IMAGE_RELOCATION_ENTRY: "
+                      << sizeof(IMAGE_RELOCATION_ENTRY);
 
-        DWORD dwNumOfEntries =
-            (DWORD)((RelocBlock->SizeOfBlock - 0x8) /
-                    sizeof(IMAGE_RELOCATION_ENTRY));  // 0x2 is the size of
-                                                      // IMAGE_RELOC_ENTRY
-        std::cout << "\n[+] Num of entries: " << dwNumOfEntries;
-        for (DWORD i = 0; i < dwNumOfEntries; ++i) {
-            const auto RelocEntry =
-                (PIMAGE_RELOCATION_ENTRY)(DWORD64)((uintptr_t)lpFileContent +
-                                                   lpRelocSection
-                                                       ->PointerToRawData +
-                                                   dwRelocOffset);
-            dwRelocOffset += 0x2;
+            DWORD dwNumOfEntries =
+                (DWORD)((RelocBlock->SizeOfBlock - 0x8) /
+                        sizeof(IMAGE_RELOCATION_ENTRY));  // 0x2 is the size of
+                                                          // IMAGE_RELOC_ENTRY
+            std::cout << "\n[+] Num of entries: " << dwNumOfEntries;
+            for (DWORD i = 0; i < dwNumOfEntries; ++i) {
+                const auto RelocEntry =
+                    (PIMAGE_RELOCATION_ENTRY)(DWORD64)((uintptr_t)
+                                                           lpFileContent +
+                                                       lpRelocSection
+                                                           ->PointerToRawData +
+                                                       dwRelocOffset);
+                dwRelocOffset += 0x2;
 
-            if (RelocEntry->Type == 0) continue;
+                if (RelocEntry->Type == 0) continue;
 
-            const auto ptrToTheAddressToFix = (uintptr_t)lpAllocAddress +
-                                              RelocBlock->VirtualAddress +
-                                              RelocEntry->Offset;
+                const auto ptrToTheAddressToFix = (uintptr_t)lpAllocAddress +
+                                                  RelocBlock->VirtualAddress +
+                                                  RelocEntry->Offset;
 
-            DWORD64 dwFixedAddress;
+                DWORD64 dwFixedAddress;
 
-            if (!ReadProcessMemory(lpPI->hProcess, (LPVOID)ptrToTheAddressToFix,
-                                   (LPVOID)&dwFixedAddress, sizeof(DWORD64),
-                                   NULL)) {
-                std::cout << "\nCannot read the address to be fixed.";
-                return false;
-            }
+                if (!ReadProcessMemory(
+                        lpPI->hProcess, (LPVOID)ptrToTheAddressToFix,
+                        (LPVOID)&dwFixedAddress, sizeof(DWORD64), NULL)) {
+                    std::cout << "\nCannot read the address to be fixed.";
+                    return false;
+                }
 
-            dwFixedAddress += DeltaImageBase;
+                dwFixedAddress += DeltaImageBase;
 
-            if (!WriteProcessMemory(
-                    lpPI->hProcess, (LPVOID)ptrToTheAddressToFix,
-                    (LPVOID)&dwFixedAddress, sizeof(DWORD64), NULL)) {
-                std::cout << "\nCannot patch new address.";
-                return false;
+                if (!WriteProcessMemory(
+                        lpPI->hProcess, (LPVOID)ptrToTheAddressToFix,
+                        (LPVOID)&dwFixedAddress, sizeof(DWORD64), NULL)) {
+                    std::cout << "\nCannot patch new address.";
+                    return false;
+                }
             }
         }
     }
