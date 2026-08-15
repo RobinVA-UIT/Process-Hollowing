@@ -86,13 +86,10 @@ LPVOID GetFileContent(const LPSTR& lpSourceImage) {
 
     std::cout << "\n[+] Payload's size (on disk): " << dwFileSize;
 
-    const LPVOID hFileContent =
-        HeapAlloc(GetProcessHeap(), 0,
-                  (SIZE_T)dwFileSize);  // Allocate heap for the payload
+    const LPVOID hFileContent = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)dwFileSize);  // Allocate heap for the payload
     if (hFileContent == NULL) {
         std::cout << "\nHeap allocation failed.";
         CloseHandle(hFile);
-        CloseHandle(hFileContent);
         return nullptr;
     }
 
@@ -102,7 +99,6 @@ LPVOID GetFileContent(const LPSTR& lpSourceImage) {
     if (!ReadFile(hFile, hFileContent, dwFileSize, &dwReadByte, nullptr)) {
         std::cout << "\nRead payload failed. Error code: " << GetLastError();
         CloseHandle(hFile);
-        CloseHandle(hFileContent);
         return nullptr;
     }
 
