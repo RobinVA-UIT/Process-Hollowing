@@ -91,7 +91,6 @@ LPVOID GetFileContent(const LPSTR& lpSourceImage, DWORD& dwFileSize) {
                   (SIZE_T)dwFileSize);  // Allocate heap for the payload
     if (lpFileContent == NULL) {
         std::cout << "\nHeap allocation failed.";
-        HeapFree(GetProcessHeap(), 0, lpFileContent);
         CloseHandle(hFile);
         return nullptr;
     }
