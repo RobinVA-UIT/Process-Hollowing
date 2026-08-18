@@ -71,7 +71,6 @@ LPVOID GetFileContent(const LPSTR& lpSourceImage, DWORD& dwFileSize) {
 
     if (hFile == INVALID_HANDLE_VALUE) {
         std::cout << "\nCreate handle for the payload failed.";
-        CloseHandle(hFile);
         return nullptr;
     }
 
@@ -126,7 +125,6 @@ bool isValidPE(const LPVOID lpPayload, const DWORD dwFileSize) {
         return false;
     }
 
-    std::cout << "\n[1]";
 
     const auto lpImageDOSHeader = (PIMAGE_DOS_HEADER)((uintptr_t)lpPayload);
 
@@ -134,7 +132,6 @@ bool isValidPE(const LPVOID lpPayload, const DWORD dwFileSize) {
         std::cout << "\nThe payload is not an actual PE file.";
         return false;
     }
-    std::cout << "\n[2]";
 
     LONG ntAddr = lpImageDOSHeader->e_lfanew;
     // There should be enough space for NT->Signature and NT->FileHeader
@@ -144,7 +141,6 @@ bool isValidPE(const LPVOID lpPayload, const DWORD dwFileSize) {
         std::cout << "\ne_lfanew is not valid.";
         return false;
     }
-    std::cout << "\n[3]";
 
     const auto lpImageNTHeaders =
         (PIMAGE_NT_HEADERS)((uintptr_t)lpImageDOSHeader + ntAddr);
@@ -154,15 +150,12 @@ bool isValidPE(const LPVOID lpPayload, const DWORD dwFileSize) {
         return false;
     }
 
-    std::cout << "\n[4]";
-
     // Characteristics is a bitmask, therefore need to use &
     if ((lpImageNTHeaders->FileHeader.Characteristics &
          IMAGE_FILE_EXECUTABLE_IMAGE) == 0) {
         std::cout << "\nThis payload is not executable.";
         return false;
     }
-    std::cout << "\n[5]";
 
     if (ntAddr + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) +
             lpImageNTHeaders->FileHeader.SizeOfOptionalHeader >
@@ -170,14 +163,12 @@ bool isValidPE(const LPVOID lpPayload, const DWORD dwFileSize) {
         std::cout << "\nInvalid Optional Header's size.";
         return false;
     }
-    std::cout << "\n[6]";
 
     if (lpImageNTHeaders->FileHeader.SizeOfOptionalHeader < sizeof(WORD)) {
         std::cout << "\nThe size of Optional Header is not large enough for "
                      "\"Magic\" member";
         return false;
     }
-    std::cout << "\n[7]";
     return true;
 }
 
@@ -243,11 +234,10 @@ char IsPayload32(const LPVOID lpFileContent) {
     const auto pImgNTHeaders =
         (PIMAGE_NT_HEADERS)((uintptr_t)pImgDOSHeader + pImgDOSHeader->e_lfanew);
 
-    if (pImgNTHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+    if (pImgNTHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC && pImgNTHeaders->FileHeader.Machine == IMAGE_FILE_MACHINE_I386) {
         std::cout << "\nResult: x86";
         return '8';
-    } else if (pImgNTHeaders->OptionalHeader.Magic ==
-               IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+    } else if (pImgNTHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && pImgNTHeaders->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 ) {
         std::cout << "\nResult: x64";
         return '6';
     }
@@ -377,6 +367,14 @@ bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
         std::cout << "\n[+] Size of section " << i + 1 << ": "
                   << (SIZE_T)lpImageSectionHeader->SizeOfRawData;
 
+        if ((lpImageSectionHeader->VirtualAddress +
+             lpImageSectionHeader->SizeOfRawData) >
+            (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
+            std::cout
+                << "\nThe section's size is larger than the allocated space.";
+            return false;
+        }
+
         if (!WriteProcessMemory(
                 lpPI->hProcess,
                 (LPVOID)((uintptr_t)lpAllocAddress +
@@ -479,6 +477,14 @@ bool RunPE64(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
                                     (i * sizeof(IMAGE_SECTION_HEADER)));
         std::cout << "\n[+] Size of section " << i + 1 << ": "
                   << (SIZE_T)lpImageSectionHeader->SizeOfRawData;
+
+        if ((lpImageSectionHeader->VirtualAddress +
+             lpImageSectionHeader->SizeOfRawData) >
+            (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
+            std::cout
+                << "\nThe section's size is larger than the allocated space.";
+            return false;
+        }
 
         if (!WriteProcessMemory(
                 lpPI->hProcess,
@@ -650,7 +656,7 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
         // Check if the size of the section is larger than the allocated space
         // lpImageSectionHeader->VirtualAddress is RVA, not VA
         if ((lpImageSectionHeader->VirtualAddress +
-             lpImageSectionHeader->Misc.VirtualSize) >
+             lpImageSectionHeader->SizeOfRawData) >
             (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
             std::cout
                 << "\nThe section's size is larger than the allocated space.";
@@ -688,12 +694,17 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
     if (bNeedReloc) {
         std::cout << "\n=====FIXING ADDRESSES=====\n";
         int iNumOfBlocks = 0;
+        DWORD dwRemainingByte = ImgDataReloc.Size;
         DWORD dwRelocOffset = 0;
-
-        while (dwRelocOffset < ImgDataReloc.Size) {
+        while (dwRemainingByte > 0) {
             // IMAGE_BASE_RELOCATION has a member called VirtualAddress
             // This indicates the start of a page (4KB) that has addresses to be
             // fixed, and these addresses are in this block
+            if(dwRemainingByte < 8)
+            {
+                std::cout << "\nCannot read the next block. The remaining byte is smaller than 8 bytes.";
+                return false;
+            }
             std::cout << "\n[+] Block " << ++iNumOfBlocks;
             const auto RelocBlock =
                 (PIMAGE_BASE_RELOCATION)(DWORD64)((uintptr_t)lpFileContent +
@@ -703,11 +714,28 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
                                                   (ImgDataReloc.VirtualAddress -
                                                    lpRelocSection
                                                        ->VirtualAddress));  // Get the reloc block
+
+            dwRemainingByte -= sizeof(IMAGE_BASE_RELOCATION);
             dwRelocOffset += sizeof(IMAGE_BASE_RELOCATION);
 
+            if(RelocBlock->SizeOfBlock < 0x8)
+            {
+                std::cout << "\nNo size for the entries.";
+                return false;
+            }
+            else if(RelocBlock->SizeOfBlock > dwRemainingByte)
+            {
+                std::cout << "\nSizeOfBlock is larger than remaining bytes.";
+                return false;
+            }
             DWORD dwNumOfEntries = (DWORD)(RelocBlock->SizeOfBlock - 0x8) /
                                    0x2;  // 0x2 is the size of IMAGE_RELOC_ENTRY
 
+            if(dwNumOfEntries * 0x2 != (RelocBlock->SizeOfBlock - 0x8))
+            {
+                std::cout << "\nThe size for entries is not valid.";
+                return false;
+            }
             for (DWORD i = 0; i < dwNumOfEntries; ++i) {
                 const auto RelocEntry =
                     (PIMAGE_RELOCATION_ENTRY)(DWORD64)((uintptr_t)
@@ -719,14 +747,21 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
                                                         lpRelocSection
                                                             ->VirtualAddress) +
                                                        dwRelocOffset);
+
+                dwRemainingByte -= 0x2;
                 dwRelocOffset += 0x2;
 
                 // Padding entry, no need to intervene
                 if (RelocEntry->Type == IMAGE_REL_BASED_ABSOLUTE) continue;
 
-                const auto ptrToTheAddressToFix = (uintptr_t)lpAllocAddress +
-                                                  RelocBlock->VirtualAddress +
-                                                  RelocEntry->Offset;
+                DWORD dwOffset = DWORD(RelocBlock->VirtualAddress + RelocEntry->Offset);
+                if(dwOffset > lpNT->OptionalHeader.SizeOfImage)
+                {
+                    std::cout << "\nThe location to be value-fixed exceeds the size of image.";
+                    return false;
+                }
+
+                const auto ptrToTheAddressToFix = (uintptr_t)lpAllocAddress + dwOffset;
 
                 DWORD dwFixedAddress;
 
@@ -867,7 +902,7 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
     if (bNeedReloc)
         ImgDataReloc = GetReloc64(lpFileContent);  // The reloc table
 
-    if (bNeedReloc && ImgDataReloc.VirtualAddress == 0 &&
+    if (bNeedReloc && ImgDataReloc.VirtualAddress == 0 ||
         ImgDataReloc.Size == 0) {
         std::cout << "\nUnable to retrieve reloc table. Error code: "
                   << GetLastError();
@@ -897,7 +932,7 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
         // Check if the size of the section is larger than the allocated space
         // lpImageSectionHeader->VirtualAddress is RVA, not VA
         if ((lpImageSectionHeader->VirtualAddress +
-             lpImageSectionHeader->Misc.VirtualSize) >
+             lpImageSectionHeader->SizeOfRawData) >
             (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
             std::cout
                 << "\nThe section's size is larger than the allocated space.";
@@ -935,11 +970,18 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
     if (bNeedReloc) {
         std::cout << "\n=====FIXING ADDRESSES=====\n";
         DWORD64 dwRelocOffset = 0;
+        DWORD64 dwRemainingByte = ImgDataReloc.Size;
         int iNumOfBlocks = 0;
         while (dwRelocOffset < ImgDataReloc.Size) {
             // IMAGE_BASE_RELOCATION has a member called VirtualAddress
             // This indicates the start of a page (4KB) that has addresses to be
             // fixed, and these addresses are in this block
+            if(dwRemainingByte < 8)
+            {
+                std::cout << "\nCannot read the next block. The remaining byte is smaller than 8 bytes.";
+                return false;
+            }
+
             std::cout << "\n[+] Block " << ++iNumOfBlocks;
             const auto RelocBlock =
                 (PIMAGE_BASE_RELOCATION)(DWORD64)((uintptr_t)lpFileContent +
@@ -950,17 +992,33 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
                                                    lpRelocSection
                                                        ->VirtualAddress));  // Get the reloc block
             std::cout << "\nGetting reloc block done.";
+
             dwRelocOffset += sizeof(IMAGE_BASE_RELOCATION);
+            dwRemainingByte -= sizeof(IMAGE_BASE_RELOCATION);            
+
             std::cout << "\n[+] Reloc Offset: " << dwRelocOffset;
 
             std::cout << "\n- Size of block: " << RelocBlock->SizeOfBlock;
-            std::cout << "\n- Size of IMAGE_RELOCATION_ENTRY: "
-                      << sizeof(IMAGE_RELOCATION_ENTRY);
 
-            DWORD dwNumOfEntries =
-                (DWORD)((RelocBlock->SizeOfBlock - 0x8) /
-                        sizeof(IMAGE_RELOCATION_ENTRY));  // 0x2 is the size of
-                                                          // IMAGE_RELOC_ENTRY
+            if(RelocBlock->SizeOfBlock < 0x8)
+            {
+                std::cout << "\nNo size for the entries.";
+                return false;
+            }
+            else if(RelocBlock->SizeOfBlock > dwRemainingByte)
+            {
+                std::cout << "\nSizeOfBlock is larger than remaining bytes.";
+                return false;
+            }
+            DWORD dwNumOfEntries = (DWORD)(RelocBlock->SizeOfBlock - 0x8) /
+                               0x2;  // 0x2 is the size of IMAGE_RELOC_ENTRY
+
+            if(dwNumOfEntries * 0x2 != (RelocBlock->SizeOfBlock - 0x8))
+            {
+                std::cout << "\nThe size for entries is not valid.";
+                return false;
+            }
+
             std::cout << "\n[+] Num of entries: " << dwNumOfEntries;
             for (DWORD i = 0; i < dwNumOfEntries; ++i) {
                 const auto RelocEntry =
@@ -978,10 +1036,15 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
                 // Padding entry, no need to intervene
                 if (RelocEntry->Type == IMAGE_REL_BASED_ABSOLUTE) continue;
 
-                const auto ptrToTheAddressToFix = (uintptr_t)lpAllocAddress +
-                                                  RelocBlock->VirtualAddress +
-                                                  RelocEntry->Offset;
-
+                DWORD dwOffset = DWORD(RelocBlock->VirtualAddress + RelocEntry->Offset);
+                if(dwOffset > lpNT->OptionalHeader.SizeOfImage)
+                {
+                    std::cout << "\nThe location to be value-fixed exceeds the size of image.";
+                    return false;
+                }
+    
+                const auto ptrToTheAddressToFix = (uintptr_t)lpAllocAddress + dwOffset;
+                
                 DWORD64 dwFixedAddress;
 
                 if (!ReadProcessMemory(
@@ -1129,10 +1192,8 @@ int main(const int argc, char* argv[]) {
     } else if (ProcessMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
         if (NativeMachine == IMAGE_FILE_MACHINE_AMD64) {
             bTarget32 = false;
-        } else if (NativeMachine == IMAGE_FILE_MACHINE_I386) {
-            bTarget32 = true;
         } else {
-            std::cout << "\nTarget's architecture is not supported.";
+            std::cout << "\nNativeMachine value is not supported.";
             CloseProcessAndCleanPayload(&PI, lpFileContent);
             return -1;
         }
@@ -1270,5 +1331,5 @@ int main(const int argc, char* argv[]) {
     std::cout << "\nProcess Hollowing failed.";
     CloseProcessAndCleanPayload(&PI, lpFileContent);
 
-    return 0;
+    return -1;
 }
