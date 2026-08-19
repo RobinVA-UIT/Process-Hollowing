@@ -1,3 +1,14 @@
+/*
+ * Adapted from:
+ * https://github.com/adamhlt/ORIGINAL_REPOSITORY
+ *
+ * Original work copyright (c) its original author(s).
+ * Modified by RobinVA-UIT, 2026.
+ *
+ * This program is licensed under the GNU General Public License v3.0.
+ * See the LICENSE file for details.
+ */
+
 #include <windows.h>
 #include <winternl.h>
 
