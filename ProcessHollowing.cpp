@@ -1,6 +1,6 @@
 /*
  * Adapted from:
- * https://github.com/adamhlt/ORIGINAL_REPOSITORY
+ * https://github.com/adamhlt/Process-Hollowing
  *
  * Original work copyright (c) its original author(s).
  * Modified by RobinVA-UIT, 2026.
