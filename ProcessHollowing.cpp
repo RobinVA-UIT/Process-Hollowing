@@ -1065,7 +1065,6 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
             std::cout << "\nGetting reloc block done.";
 
             dwRelocOffset += sizeof(IMAGE_BASE_RELOCATION);
-            dwRemainingByte -= sizeof(IMAGE_BASE_RELOCATION);            
 
             std::cout << "\n[+] Reloc Offset: " << dwRelocOffset;
 
@@ -1081,6 +1080,9 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
                 std::cout << "\nSizeOfBlock is larger than remaining bytes.";
                 return false;
             }
+            
+            dwRemainingByte -= sizeof(IMAGE_BASE_RELOCATION);            
+    
             DWORD dwNumOfEntries = (DWORD)(RelocBlock->SizeOfBlock - 0x8) /
                                0x2;  // 0x2 is the size of IMAGE_RELOC_ENTRY
 
@@ -1308,6 +1310,13 @@ int main(const int argc, char* argv[]) {
     }
 
     bool bPayload32 = (plArch == PayloadArch::x86)? true : false;
+
+    if(bPayload32 != bTarget32)
+    {
+        std::cout << "\nArchitecture of payload and target process is not compatible.";
+        CloseProcessAndCleanPayload(&PI, lpFileContent);
+        return -1; 
+    }
 
     /*Check the size of optional header*/
     if(bPayload32)
