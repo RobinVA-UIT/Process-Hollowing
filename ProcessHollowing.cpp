@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <winternl.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <iostream>
 
@@ -363,8 +364,10 @@ bool HasReloc32(const LPVOID lpFileContent) {
         std::cout << "\nSizeOfOptionalHeader is insufficient.";
         return false;
     }
+    
 
-    if (lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
+    if (lpNT->OptionalHeader.NumberOfRvaAndSizes > 5 &&
+        lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
             .VirtualAddress != 0)
         return true;
 
@@ -381,7 +384,8 @@ bool HasReloc64(const LPVOID lpFileContent) {
         return false;
     }
 
-    if (lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
+    if (lpNT->OptionalHeader.NumberOfRvaAndSizes > 5 &&
+        lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
             .VirtualAddress != 0)
         return true;
 
@@ -405,21 +409,41 @@ bool RunPE32(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent, const
         return false;
     }
 
+    DWORD dwSizeOfHeaders = lpNT->OptionalHeader.SizeOfHeaders;
+    //SizeOfHeaders verification
+    if(dwSizeOfHeaders > lpNT->OptionalHeader.SizeOfImage)
+    {
+        std::cout << "\nSizeOfHeaders exceeds SizeOfImage.";
+        return false;
+    }
+    else if(dwSizeOfHeaders > dwFileSize)
+    {
+        std::cout << "\nSizeOfHeaders exceeds file size.";
+        return false;
+    }
+
     // Write headers
     if (!WriteProcessMemory(lpPI->hProcess, lpAllocAddress, lpFileContent,
-                            (SIZE_T)lpNT->OptionalHeader.SizeOfHeaders, NULL)) {
+                            (SIZE_T)dwSizeOfHeaders, NULL)) {
         std::cout << "\nWrite headers on allocated space failed. Error code: "
                   << GetLastError();
         return false;
     }
 
+    const LPVOID lpStartOfSectionHeader = (LPVOID)((uintptr_t)lpNT + 4 + sizeof(IMAGE_FILE_HEADER) +
+                                          lpNT->FileHeader.SizeOfOptionalHeader);
+
+    if((uintptr_t)(lpStartOfSectionHeader) + (lpNT->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER)) > ((uintptr_t)(lpDOS) + dwFileSize))
+
+    {
+        std::cout << "\nThe section table surpasses the file size.";
+        return false;
+    }
+
     // Write sections
     for (int i = 0; i < lpNT->FileHeader.NumberOfSections; ++i) {
-        const auto lpImageSectionHeader =
-            (PIMAGE_SECTION_HEADER)((uintptr_t)lpNT + 4 +
-                                    sizeof(IMAGE_FILE_HEADER) +
-                                    lpNT->FileHeader.SizeOfOptionalHeader +
-                                    (i * sizeof(IMAGE_SECTION_HEADER)));
+        const auto lpImageSectionHeader = (PIMAGE_SECTION_HEADER)((uintptr_t)lpStartOfSectionHeader +
+                                                                  i * (sizeof(IMAGE_SECTION_HEADER)));
 
         std::cout << "\n[+] Size of section " << i + 1 << ": "
                   << (SIZE_T)lpImageSectionHeader->SizeOfRawData;
@@ -520,24 +544,45 @@ bool RunPE64(const LPPROCESS_INFORMATION lpPI, const LPVOID lpFileContent, const
         return false;
     }
 
+    DWORD dwSizeOfHeaders = lpNT->OptionalHeader.SizeOfHeaders;
+    
     std::cout << "\n[+] Alloc address: " << (uintptr_t)lpAllocAddress;
     std::cout << "\n[+] Size of headers: "
-              << (SIZE_T)lpNT->OptionalHeader.SizeOfHeaders;
+              << (SIZE_T)dwSizeOfHeaders;
+
+    //SizeOfHeaders verification
+    if(dwSizeOfHeaders > lpNT->OptionalHeader.SizeOfImage)
+    {
+        std::cout << "\nSizeOfHeaders exceeds SizeOfImage.";
+        return false;
+    }
+    else if(dwSizeOfHeaders > dwFileSize)
+    {
+        std::cout << "\nSizeOfHeaders exceeds file size.";
+        return false;
+    }
 
     // Write headers
     if (!WriteProcessMemory(lpPI->hProcess, lpAllocAddress, lpFileContent,
-                            (SIZE_T)lpNT->OptionalHeader.SizeOfHeaders, NULL)) {
-        std::cout << "\nWrite headers on allocated space failed.";
+                            (SIZE_T)dwSizeOfHeaders, NULL)) {
+        std::cout << "\nWrite headers on allocated space failed. Error code: "
+                  << GetLastError();
+        return false;
+    }
+    
+    const LPVOID lpStartOfSectionHeader = (LPVOID)((uintptr_t)lpNT + 4 + sizeof(IMAGE_FILE_HEADER) +
+                                          lpNT->FileHeader.SizeOfOptionalHeader);
+
+    if((uintptr_t)(lpStartOfSectionHeader) + (lpNT->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER)) > ((uintptr_t)(lpDOS) + dwFileSize))
+    {
+        std::cout << "\nThe section table surpasses the file size.";
         return false;
     }
 
     // Write sections
     for (int i = 0; i < lpNT->FileHeader.NumberOfSections; ++i) {
-        const auto lpImageSectionHeader =
-            (PIMAGE_SECTION_HEADER)((uintptr_t)lpNT + 4 +
-                                    sizeof(IMAGE_FILE_HEADER) +
-                                    lpNT->FileHeader.SizeOfOptionalHeader +
-                                    (i * sizeof(IMAGE_SECTION_HEADER)));
+        const auto lpImageSectionHeader = (PIMAGE_SECTION_HEADER)((uintptr_t)lpStartOfSectionHeader +
+                                                                  i * (sizeof(IMAGE_SECTION_HEADER)));
         std::cout << "\n[+] Size of section " << i + 1 << ": "
                   << (SIZE_T)lpImageSectionHeader->SizeOfRawData;
 
@@ -623,10 +668,10 @@ IMAGE_DATA_DIRECTORY GetReloc32(const LPVOID lpFileContent) {
     const auto lpDOS = (PIMAGE_DOS_HEADER)lpFileContent;
     const auto lpNT = (PIMAGE_NT_HEADERS32)((uintptr_t)lpDOS + lpDOS->e_lfanew);
 
-    if (lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
-            .VirtualAddress != 0)
-        return lpNT->OptionalHeader
-            .DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    if ((lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress +
+         lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size)
+        <= lpNT->OptionalHeader.SizeOfImage)
+        return lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
 
     return {0, 0};
 }
@@ -635,10 +680,10 @@ IMAGE_DATA_DIRECTORY GetReloc64(const LPVOID lpFileContent) {
     const auto lpDOS = (PIMAGE_DOS_HEADER)lpFileContent;
     const auto lpNT = (PIMAGE_NT_HEADERS64)((uintptr_t)lpDOS + lpDOS->e_lfanew);
 
-    if (lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
-            .VirtualAddress != 0)
-        return lpNT->OptionalHeader
-            .DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    if ((lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress +
+         lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size)
+        <= lpNT->OptionalHeader.SizeOfImage)
+        return lpNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
 
     return {0, 0};
 }
@@ -687,12 +732,26 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
     // Set new ImageBase
     if (bNeedReloc) lpNT->OptionalHeader.ImageBase = (DWORD64)lpAllocAddress;
 
+    DWORD dwSizeOfHeaders = lpNT->OptionalHeader.SizeOfHeaders;
+    
     std::cout << "\n[+] Size of headers: "
-              << (SIZE_T)lpNT->OptionalHeader.SizeOfHeaders;
+              << (SIZE_T)dwSizeOfHeaders;
+
+    //SizeOfHeaders verification
+    if(dwSizeOfHeaders > lpNT->OptionalHeader.SizeOfImage)
+    {
+        std::cout << "\nSizeOfHeaders exceeds SizeOfImage.";
+        return false;
+    }
+    else if(dwSizeOfHeaders > dwFileSize)
+    {
+        std::cout << "\nSizeOfHeaders exceeds file size.";
+        return false;
+    }
 
     // Write headers
     if (!WriteProcessMemory(lpPI->hProcess, lpAllocAddress, lpFileContent,
-                            (SIZE_T)lpNT->OptionalHeader.SizeOfHeaders, NULL)) {
+                            (SIZE_T)dwSizeOfHeaders, NULL)) {
         std::cout << "\nWrite headers on allocated space failed. Error code: "
                   << GetLastError();
         return false;
@@ -711,17 +770,22 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
         return false;
     }
 
-    PIMAGE_SECTION_HEADER lpRelocSection =
-        nullptr;  // The address of the section containing reloc
+    PIMAGE_SECTION_HEADER lpRelocSection = nullptr;  // The address of the section containing reloc
+    
+    const LPVOID lpStartOfSectionHeader = (LPVOID)((uintptr_t)lpNT + 4 + sizeof(IMAGE_FILE_HEADER) +
+                                          lpNT->FileHeader.SizeOfOptionalHeader);
+
+    if((uintptr_t)(lpStartOfSectionHeader) + (lpNT->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER)) > ((uintptr_t)(lpDOS) + dwFileSize))
+    {
+        std::cout << "\nThe section table surpasses the file size.";
+        return false;
+    }
+
 
     // Write sections
     for (int i = 0; i < lpNT->FileHeader.NumberOfSections; ++i) {
-        const auto lpImageSectionHeader =
-            (PIMAGE_SECTION_HEADER)((uintptr_t)lpNT + 4 +
-                                    sizeof(IMAGE_FILE_HEADER) +
-                                    lpNT->FileHeader.SizeOfOptionalHeader +
-                                    (i * sizeof(IMAGE_SECTION_HEADER)));
-
+        const auto lpImageSectionHeader = (PIMAGE_SECTION_HEADER)((uintptr_t)lpStartOfSectionHeader +
+                                                                  i * (sizeof(IMAGE_SECTION_HEADER)));
         // Check if the size of the section is larger than the allocated space
         // lpImageSectionHeader->VirtualAddress is RVA, not VA
         if ((lpImageSectionHeader->VirtualAddress +
@@ -738,12 +802,10 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
             return false;
         }
 
-        if (bNeedReloc &&
-            ImgDataReloc.VirtualAddress >=
-                (uintptr_t)lpImageSectionHeader->VirtualAddress &&
-            ImgDataReloc.VirtualAddress <
-                (lpImageSectionHeader->VirtualAddress +
-                 lpImageSectionHeader->Misc.VirtualSize))
+        if (bNeedReloc && 
+            ImgDataReloc.VirtualAddress >= (uintptr_t)lpImageSectionHeader->VirtualAddress &&
+            ImgDataReloc.VirtualAddress <(lpImageSectionHeader->VirtualAddress +
+                                          lpImageSectionHeader->Misc.VirtualSize))
             lpRelocSection = lpImageSectionHeader;
 
         if (!WriteProcessMemory(
@@ -767,6 +829,30 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
 
     // Fixing addresses
     if (bNeedReloc) {
+        /*
+        Check two conditions of the relocation table:
+        1. The table must be within SizeOfRawData of the section
+        2. The table's size must not surpass the file size
+        */
+        uint64_t ullOffsetInSection = static_cast<uint64_t>(ImgDataReloc.VirtualAddress);
+        std::cout << "\nImgDataReloc address = " << ullOffsetInSection;
+        std::cout << "\nReloc section address = " << lpRelocSection->VirtualAddress; 
+        ullOffsetInSection -= static_cast<uint64_t>(lpRelocSection->VirtualAddress);
+
+        if((ullOffsetInSection + ImgDataReloc.Size) 
+           > static_cast<uint64_t>(lpRelocSection->SizeOfRawData))
+        {
+            std::cout << "\nThe relocation table size is not entirely within the section's raw data.";
+            return false;
+        }
+
+        if((ullOffsetInSection + lpRelocSection->PointerToRawData + ImgDataReloc.Size) > dwFileSize)
+        {
+            std::cout << "\nThe relocation table size exceeds the file size";
+            return false;
+        }
+
+
         std::cout << "\n=====FIXING ADDRESSES=====\n";
         int iNumOfBlocks = 0;
         DWORD dwRemainingByte = ImgDataReloc.Size;
@@ -832,7 +918,11 @@ bool RunPEReloc32(const LPPROCESS_INFORMATION lpPI,
                 if (RelocEntry->Type == IMAGE_REL_BASED_ABSOLUTE) continue;
 
                 DWORD dwOffset = DWORD(RelocBlock->VirtualAddress + RelocEntry->Offset);
-                if(dwOffset > lpNT->OptionalHeader.SizeOfImage)
+
+                /* The offset to the relocation location, as well as the size of the value to be adjusted, 
+                  must not surpass the size of image*/
+                if(dwOffset > lpNT->OptionalHeader.SizeOfImage || 
+                   sizeof(DWORD) > (lpNT->OptionalHeader.SizeOfImage - dwOffset))
                 {
                     std::cout << "\nThe location to be value-fixed exceeds the size of image.";
                     return false;
@@ -962,12 +1052,26 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
     // Set new ImageBase
     if (bNeedReloc) lpNT->OptionalHeader.ImageBase = (DWORD64)lpAllocAddress;
 
+    DWORD dwSizeOfHeaders = lpNT->OptionalHeader.SizeOfHeaders;
+    
     std::cout << "\n[+] Size of headers: "
-              << (SIZE_T)lpNT->OptionalHeader.SizeOfHeaders;
+              << (SIZE_T)dwSizeOfHeaders;
+
+    //SizeOfHeaders verification
+    if(dwSizeOfHeaders > lpNT->OptionalHeader.SizeOfImage)
+    {
+        std::cout << "\nSizeOfHeaders exceeds SizeOfImage.";
+        return false;
+    }
+    else if(dwSizeOfHeaders > dwFileSize)
+    {
+        std::cout << "\nSizeOfHeaders exceeds file size.";
+        return false;
+    }
 
     // Write headers
     if (!WriteProcessMemory(lpPI->hProcess, lpAllocAddress, lpFileContent,
-                            (SIZE_T)lpNT->OptionalHeader.SizeOfHeaders, NULL)) {
+                            (SIZE_T)dwSizeOfHeaders, NULL)) {
         std::cout << "\nWrite headers on allocated space failed. Error code: "
                   << GetLastError();
         return false;
@@ -986,26 +1090,29 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
         return false;
     }
 
-    PIMAGE_SECTION_HEADER lpRelocSection =
-        nullptr;  // The address of the section containing reloc
+    PIMAGE_SECTION_HEADER lpRelocSection = nullptr;  // The address of the section containing reloc
+   
+    const LPVOID lpStartOfSectionHeader = (LPVOID)((uintptr_t)lpNT + 4 + sizeof(IMAGE_FILE_HEADER) +
+                                          lpNT->FileHeader.SizeOfOptionalHeader);
 
+    if((uintptr_t)(lpStartOfSectionHeader) + (lpNT->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER)) > ((uintptr_t)(lpDOS) + dwFileSize))
+    {
+        std::cout << "\nThe section table surpasses the file size.";
+        return false;
+    }
+
+
+    std::cout << "\nNumber of sections: " << lpNT->FileHeader.NumberOfSections;
     // Write sections
-    std::cout << "\n[+] Number of sections: "
-              << lpNT->FileHeader.NumberOfSections;
     for (int i = 0; i < lpNT->FileHeader.NumberOfSections; ++i) {
-        const auto lpImageSectionHeader =
-            (PIMAGE_SECTION_HEADER)((uintptr_t)lpNT + 4 +
-                                    sizeof(IMAGE_FILE_HEADER) +
-                                    lpNT->FileHeader.SizeOfOptionalHeader +
-                                    (i * sizeof(IMAGE_SECTION_HEADER)));
+        const auto lpImageSectionHeader = (PIMAGE_SECTION_HEADER)((uintptr_t)lpStartOfSectionHeader +
+                                                                  i * (sizeof(IMAGE_SECTION_HEADER)));
 
         std::cout << "\n[+] Section " << i + 1;
 
         std::cout << "\nSection + Previous data = "
                   << lpImageSectionHeader->VirtualAddress +
                          lpImageSectionHeader->Misc.VirtualSize;
-        std::cout << "\nSize of allocation: "
-                  << (SIZE_T)lpNT->OptionalHeader.SizeOfImage;
         // Check if the size of the section is larger than the allocated space
         // lpImageSectionHeader->VirtualAddress is RVA, not VA
         if ((lpImageSectionHeader->VirtualAddress +
@@ -1021,14 +1128,16 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
             std::cout << "\nSection exceeds file size limit.";
             return false;
         }
-
         if (bNeedReloc &&
             ImgDataReloc.VirtualAddress >=
                 (uintptr_t)lpImageSectionHeader->VirtualAddress &&
             ImgDataReloc.VirtualAddress <
                 (lpImageSectionHeader->VirtualAddress +
                  lpImageSectionHeader->Misc.VirtualSize))
-            lpRelocSection = lpImageSectionHeader;
+        {
+            lpRelocSection = const_cast<PIMAGE_SECTION_HEADER>(lpImageSectionHeader);
+            std::cout << "\nReloc section's VA = " << lpRelocSection->VirtualAddress;
+        }
 
         if (!WriteProcessMemory(
                 lpPI->hProcess,
@@ -1043,7 +1152,7 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
             return false;
         }
     }
-
+    
     if (bNeedReloc && lpRelocSection == nullptr) {
         std::cout << "\nCannot find relocation section.";
         return false;
@@ -1051,6 +1160,29 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
 
     // Fixing addresses
     if (bNeedReloc) {
+        /*
+        Check two conditions of the relocation table:
+        1. The table must be within SizeOfRawData of the section
+        2. The table's size must not surpass the file size
+        */
+        uint64_t ullOffsetInSection = static_cast<uint64_t>(ImgDataReloc.VirtualAddress);
+        std::cout << "\nImgDataReloc address = " << ullOffsetInSection;
+        std::cout << "\nReloc section address = " << lpRelocSection->VirtualAddress; 
+        ullOffsetInSection -= static_cast<uint64_t>(lpRelocSection->VirtualAddress);
+
+        if((ullOffsetInSection + ImgDataReloc.Size) 
+           > static_cast<uint64_t>(lpRelocSection->SizeOfRawData))
+        {
+            std::cout << "\nThe relocation table size is not entirely within the section's raw data.";
+            return false;
+        }
+
+        if((ullOffsetInSection + lpRelocSection->PointerToRawData + ImgDataReloc.Size) > dwFileSize)
+        {
+            std::cout << "\nThe relocation table size exceeds the file size";
+            return false;
+        }
+
         std::cout << "\n=====FIXING ADDRESSES=====\n";
         DWORD64 dwRelocOffset = 0;
         DWORD64 dwRemainingByte = ImgDataReloc.Size;
@@ -1122,7 +1254,11 @@ bool RunPEReloc64(const LPPROCESS_INFORMATION lpPI,
                 if (RelocEntry->Type == IMAGE_REL_BASED_ABSOLUTE) continue;
 
                 DWORD dwOffset = DWORD(RelocBlock->VirtualAddress + RelocEntry->Offset);
-                if(dwOffset > lpNT->OptionalHeader.SizeOfImage)
+
+                /* The offset to the relocation location, as well as the size of the value to be adjusted, 
+                  must not surpass the size of image*/
+                if(dwOffset > lpNT->OptionalHeader.SizeOfImage || 
+                   sizeof(DWORD64) > (lpNT->OptionalHeader.SizeOfImage - dwOffset))
                 {
                     std::cout << "\nThe location to be value-fixed exceeds the size of image.";
                     return false;
